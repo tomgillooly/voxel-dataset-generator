@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Dataset outputs
+dataset/
+output/
+thingi10k_cache/
+*.npz
+*.npy
+
+# Analysis outputs
+*.parquet
+*.csv
+*.ndjson
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
