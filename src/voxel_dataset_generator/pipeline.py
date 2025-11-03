@@ -12,6 +12,7 @@ from .subdivision.subdivider import Subdivider
 from .deduplication.registry import SubvolumeRegistry
 from .utils.config import Config
 from .utils.metadata import MetadataWriter
+from .splitting.splitter import HierarchicalSplitter, SplitConfig, Split
 
 
 class DatasetGenerator:
@@ -40,8 +41,62 @@ class DatasetGenerator:
         self.subdivider = Subdivider(min_resolution=self.config.min_resolution)
         self.registry = SubvolumeRegistry(base_dir=self.config.output_dir)
 
+        # Initialize splitter if splitting is enabled
+        self.splitter = None
+        if self.config.enable_splitting:
+            split_config = SplitConfig(
+                train_ratio=self.config.train_ratio,
+                val_ratio=self.config.val_ratio,
+                test_ratio=self.config.test_ratio,
+                seed=self.config.split_seed
+            )
+            self.splitter = HierarchicalSplitter(split_config)
+
         # Statistics
         self.num_processed = 0
+        self._object_ids_pending_split = []  # Track objects before assigning splits
+        self._pending_subvolume_registrations = []  # Track subvolumes to register after splits assigned
+
+    def assign_splits(self, object_ids: Optional[List[str]] = None):
+        """
+        Assign train/val/test splits to objects.
+
+        This should be called after all objects have been added but before
+        processing them, or can be called automatically during finalize().
+
+        Args:
+            object_ids: List of object IDs to assign splits to.
+                       If None, uses pending object IDs from processing.
+        """
+        if not self.config.enable_splitting or self.splitter is None:
+            return
+
+        if object_ids is None:
+            object_ids = self._object_ids_pending_split
+
+        if not object_ids:
+            print("No objects to assign splits to")
+            return
+
+        self.splitter.assign_splits(object_ids)
+        print(f"Assigned splits to {len(object_ids)} objects")
+        print(f"  Train: {len(self.splitter.get_objects_by_split(Split.TRAIN))}")
+        print(f"  Val: {len(self.splitter.get_objects_by_split(Split.VAL))}")
+        if self.config.test_ratio > 0:
+            print(f"  Test: {len(self.splitter.get_objects_by_split(Split.TEST))}")
+
+        # Register all pending subvolumes now that objects have splits
+        if self._pending_subvolume_registrations:
+            print(f"Registering {len(self._pending_subvolume_registrations)} pending subvolumes...")
+            for reg in self._pending_subvolume_registrations:
+                self.splitter.register_subvolume(
+                    object_id=reg['object_id'],
+                    hash_val=reg['hash_val'],
+                    voxel_data=None,
+                    is_trivial=reg['is_trivial']
+                )
+            self._pending_subvolume_registrations.clear()
+            print("Subvolume registration complete")
 
     def process_mesh(
         self,
@@ -108,6 +163,10 @@ class DatasetGenerator:
                 compressed=self.config.compression
             )
 
+        # Track object for splitting
+        if self.config.enable_splitting and object_id not in self._object_ids_pending_split:
+            self._object_ids_pending_split.append(object_id)
+
         # Step 2: Subdivide into hierarchy
         subdivisions = self.subdivider.subdivide_all_levels(voxel_grid)
 
@@ -117,6 +176,25 @@ class DatasetGenerator:
 
         for level, subvolumes in subdivisions.items():
             for subvol in subvolumes:
+                # Register with splitter if enabled AND object has been assigned a split
+                if self.splitter is not None:
+                    if self.splitter.get_object_split(object_id) is not None:
+                        # Object already has a split, register immediately
+                        self.splitter.register_subvolume(
+                            object_id=object_id,
+                            hash_val=subvol.hash,
+                            voxel_data=subvol.data,
+                            is_trivial=subvol.is_empty or self.splitter.is_trivial_subvolume(subvol.data)
+                        )
+                    else:
+                        # Object doesn't have a split yet, store for later registration
+                        is_trivial = subvol.is_empty or self.splitter.is_trivial_subvolume(subvol.data)
+                        self._pending_subvolume_registrations.append({
+                            'object_id': object_id,
+                            'hash_val': subvol.hash,
+                            'is_trivial': is_trivial
+                        })
+
                 # Register in global registry
                 is_new = self.registry.register(
                     data_hash=subvol.hash,
@@ -206,6 +284,11 @@ class DatasetGenerator:
 
     def finalize(self):
         """Finalize dataset generation by writing global metadata."""
+        # Assign splits if not already done
+        if self.config.enable_splitting and self.splitter is not None:
+            if self._object_ids_pending_split:
+                self.assign_splits()
+
         # Get statistics from registry
         stats = self.registry.get_overall_stats()
 
@@ -217,6 +300,16 @@ class DatasetGenerator:
             "compression": self.config.compression,
         }
 
+        # Add split configuration if enabled
+        if self.config.enable_splitting:
+            config_dict["splitting"] = {
+                "enabled": True,
+                "train_ratio": self.config.train_ratio,
+                "val_ratio": self.config.val_ratio,
+                "test_ratio": self.config.test_ratio,
+                "seed": self.config.split_seed
+            }
+
         MetadataWriter.write_dataset_metadata(
             output_path=self.config.get_metadata_path(),
             config=config_dict,
@@ -226,6 +319,12 @@ class DatasetGenerator:
 
         # Save registry
         self.registry.save_registry()
+
+        # Save split assignments if enabled
+        if self.splitter is not None:
+            split_path = self.config.output_dir / "splits.json"
+            self.splitter.save_split_assignments(split_path)
+            print(f"\nSaved split assignments to {split_path}")
 
         print(f"\nDataset generation complete!")
         print(f"Processed {self.num_processed} objects")
@@ -239,6 +338,27 @@ class DatasetGenerator:
             print(f"  Level {level}: {level_stats['unique']:,} unique / "
                   f"{level_stats['total']:,} total "
                   f"({level_stats['deduplication_ratio']:.2%} dedup ratio)")
+
+        # Print split statistics if enabled
+        if self.splitter is not None:
+            print("\nSplit statistics:")
+            split_stats = self.splitter.get_split_statistics()
+            print(f"  Objects: Train={split_stats['objects']['train']}, "
+                  f"Val={split_stats['objects']['val']}, "
+                  f"Test={split_stats['objects']['test']}")
+
+            hash_dist = split_stats['unique_nontrivial_hashes']['distribution']
+            print(f"  Unique non-trivial hashes:")
+            print(f"    Only in Train: {hash_dist['only_train']}")
+            print(f"    Only in Val: {hash_dist['only_val']}")
+            if self.config.test_ratio > 0:
+                print(f"    Only in Test: {hash_dist['only_test']}")
+            print(f"    Shared across splits: Train-Val={hash_dist['train_val']}, "
+                  f"Train-Test={hash_dist['train_test']}, "
+                  f"Val-Test={hash_dist['val_test']}, "
+                  f"All={hash_dist['all_splits']}")
+            print(f"  Trivial hashes (shared across all splits): "
+                  f"{split_stats['trivial_hashes']['count']}")
 
 
 def generate_dataset_from_thingi10k(
@@ -276,7 +396,8 @@ def generate_dataset_from_thingi10k(
         base_resolution=base_resolution,
         min_resolution=min_resolution,
         output_dir=output_dir,
-        solid_voxelization=True
+        solid_voxelization=True,
+        enable_splitting=True
     )
 
     # Create generator
@@ -293,7 +414,10 @@ def generate_dataset_from_thingi10k(
     while processed < num_objects:
         try:
             # Download object
-            object_info = next(data_iter)
+            try:
+                object_info = next(data_iter)
+            except StopIteration:
+                break
             if processed_things[object_info['thing_id']]:
                 continue
             processed_things[object_info['thing_id']] = True

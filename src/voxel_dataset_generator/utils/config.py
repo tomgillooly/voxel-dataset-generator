@@ -17,6 +17,11 @@ class Config:
         use_sparse: Whether to use sparse voxel representation
         compression: Whether to compress voxel data (.npz vs .npy)
         solid_voxelization: If True, fill interior of meshes (default: True)
+        enable_splitting: If True, enable train/val/test splitting
+        train_ratio: Ratio of objects for training split (default: 0.8)
+        val_ratio: Ratio of objects for validation split (default: 0.2)
+        test_ratio: Ratio of objects for test split (default: 0.0)
+        split_seed: Random seed for split assignment (default: 42)
     """
 
     base_resolution: int = 128
@@ -25,6 +30,11 @@ class Config:
     use_sparse: bool = False
     compression: bool = True
     solid_voxelization: bool = True
+    enable_splitting: bool = False
+    train_ratio: float = 0.8
+    val_ratio: float = 0.2
+    test_ratio: float = 0.0
+    split_seed: Optional[int] = 42
 
     def __post_init__(self):
         """Validate configuration and compute derived values."""
@@ -39,6 +49,17 @@ class Config:
                 f"base_resolution ({self.base_resolution}) must be >= "
                 f"min_resolution ({self.min_resolution})"
             )
+
+        # Validate split ratios if splitting is enabled
+        if self.enable_splitting:
+            total = self.train_ratio + self.val_ratio + self.test_ratio
+            if not abs(total - 1.0) < 1e-6:
+                raise ValueError(
+                    f"Split ratios must sum to 1.0, got {total} "
+                    f"(train={self.train_ratio}, val={self.val_ratio}, test={self.test_ratio})"
+                )
+            if self.train_ratio < 0 or self.val_ratio < 0 or self.test_ratio < 0:
+                raise ValueError("Split ratios must be non-negative")
 
         # Ensure output directory exists
         self.output_dir = Path(self.output_dir)
