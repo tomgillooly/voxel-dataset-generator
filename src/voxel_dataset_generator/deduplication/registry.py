@@ -68,7 +68,7 @@ class SubvolumeRegistry:
 
         # Save to disk if requested
         file_path = None
-        if save_to_disk and not is_empty:
+        if save_to_disk:
             file_path = self._get_subvolume_path(level, data_hash)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             np.savez_compressed(file_path, voxels=voxel_data)

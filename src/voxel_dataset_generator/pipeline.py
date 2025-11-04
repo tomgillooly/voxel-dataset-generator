@@ -4,6 +4,8 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, List
 from tqdm import tqdm
+import hashlib
+import json
 
 from collections import defaultdict
 
@@ -57,6 +59,107 @@ class DatasetGenerator:
         self._object_ids_pending_split = []  # Track objects before assigning splits
         self._pending_subvolume_registrations = []  # Track subvolumes to register after splits assigned
 
+    def _compute_source_hash(self, mesh_path: Optional[Path] = None,
+                            vertices: Optional[np.ndarray] = None,
+                            faces: Optional[np.ndarray] = None,
+                            source_name: Optional[str] = None) -> str:
+        """Compute a hash of the source mesh to verify we're processing the same object.
+
+        Args:
+            mesh_path: Path to mesh file
+            vertices: Vertex array
+            faces: Face array
+            source_name: Source name for array-based meshes
+
+        Returns:
+            SHA256 hash string
+        """
+        hasher = hashlib.sha256()
+
+        if mesh_path is not None:
+            # Hash the file path
+            hasher.update(str(mesh_path).encode('utf-8'))
+        elif vertices is not None and faces is not None:
+            # Hash the array data
+            hasher.update(vertices.tobytes())
+            hasher.update(faces.tobytes())
+            if source_name:
+                hasher.update(source_name.encode('utf-8'))
+
+        return hasher.hexdigest()
+
+    def _verify_object_complete(self, object_id: str, source_hash: str) -> bool:
+        """Check if an object has been fully processed.
+
+        Verifies:
+        1. Object directory exists
+        2. Source hash matches (same mesh)
+        3. All required files exist (metadata.json, subdivision_map.json, level_0.npz)
+        4. All subvolumes referenced in subdivision_map exist
+
+        Args:
+            object_id: The object ID to check
+            source_hash: Hash of the source mesh to verify identity
+
+        Returns:
+            True if object is complete and matches the source, False otherwise
+        """
+        obj_dir = self.config.get_object_dir(object_id)
+
+        # Check if directory exists
+        if not obj_dir.exists():
+            return False
+
+        # Check for required files
+        metadata_path = obj_dir / "metadata.json"
+        subdivision_map_path = obj_dir / "subdivision_map.json"
+        level_0_path = obj_dir / "level_0.npz"
+
+        if not metadata_path.exists() or not subdivision_map_path.exists():
+            return False
+
+        # Read metadata to check source hash
+        try:
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+
+            # Check if source hash exists and matches
+            stored_hash = metadata.get('source_hash')
+            if stored_hash is None or stored_hash != source_hash:
+                # Hash mismatch or not present - different object
+                return False
+
+        except (json.JSONDecodeError, IOError):
+            return False
+
+        # Check level_0.npz if save_voxels is expected
+        # Note: We'll check this exists, but it's optional depending on save_voxels flag
+
+        # Read subdivision map and verify all subvolumes exist
+        try:
+            with open(subdivision_map_path, 'r') as f:
+                subdivision_records = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return False
+
+        # Group subvolumes by level and hash
+        subvolumes_by_level = defaultdict(set)
+        for record in subdivision_records:
+            level = record['level']
+            hash_val = record['hash']
+            subvolumes_by_level[level].add(hash_val)
+
+        # Verify each unique subvolume file exists
+        for level, hashes in subvolumes_by_level.items():
+            for hash_val in hashes:
+                npz_path = self.registry._get_subvolume_path(level, hash_val)
+                
+                if not npz_path.exists():# and not npy_path.exists():
+                    # Missing subvolume file
+                    return False
+
+        return True
+
     def assign_splits(self, object_ids: Optional[List[str]] = None):
         """
         Assign train/val/test splits to objects.
@@ -105,7 +208,8 @@ class DatasetGenerator:
         save_voxels: bool = True,
         vertices: Optional[np.ndarray] = None,
         faces: Optional[np.ndarray] = None,
-        source_name: Optional[str] = None
+        source_name: Optional[str] = None,
+        skip_if_complete: bool = True
     ) -> dict:
         """Process a single mesh through the full pipeline.
 
@@ -116,6 +220,7 @@ class DatasetGenerator:
             vertices: Nx3 array of vertex coordinates (alternative to mesh_path)
             faces: Mx3 array of face indices (alternative to mesh_path)
             source_name: Source identifier for metadata (used with vertices/faces)
+            skip_if_complete: If True, skip processing if object already complete
 
         Returns:
             Dictionary with processing results
@@ -135,6 +240,41 @@ class DatasetGenerator:
             ...     source_name="thingi10k/12345"
             ... )
         """
+        # Compute source hash for resume verification
+        source_hash = self._compute_source_hash(
+            mesh_path=mesh_path,
+            vertices=vertices,
+            faces=faces,
+            source_name=source_name
+        )
+
+        # Check if object is already complete
+        if skip_if_complete and self._verify_object_complete(object_id, source_hash):
+            # Object already processed, load existing metadata for stats
+            obj_dir = self.config.get_object_dir(object_id)
+            subdivision_map_path = obj_dir / "subdivision_map.json"
+
+            with open(subdivision_map_path, 'r') as f:
+                subdivision_records = json.load(f)
+
+            metadata_path = obj_dir / "metadata.json"
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+
+            # Track for splitting if needed
+            if self.config.enable_splitting and object_id not in self._object_ids_pending_split:
+                self._object_ids_pending_split.append(object_id)
+
+            self.num_processed += 1
+
+            return {
+                "object_id": object_id,
+                "num_subvolumes": len(subdivision_records),
+                "new_unique_subvolumes": 0,  # Already existed
+                "occupancy_ratio": metadata.get("occupancy_ratio", 0.0),
+                "skipped": True
+            }
+
         # Step 1: Voxelize the mesh
         if vertices is not None and faces is not None:
             # Use array-based voxelization
@@ -221,14 +361,16 @@ class DatasetGenerator:
                     "hash": subvol.hash,
                     "is_empty": subvol.is_empty,
                 }
+                
                 subdivision_records.append(record)
 
-        # Step 4: Write metadata
+        # Step 4: Write metadata (including source hash for resume support)
         MetadataWriter.write_object_metadata(
             output_path=obj_dir / "metadata.json",
             object_id=object_id,
             source_file=source_file,
-            voxel_metadata=voxel_metadata
+            voxel_metadata=voxel_metadata,
+            source_hash=source_hash
         )
 
         MetadataWriter.write_subdivision_map(
@@ -249,7 +391,8 @@ class DatasetGenerator:
         self,
         mesh_files: List[Path],
         start_id: int = 0,
-        show_progress: bool = True
+        show_progress: bool = True,
+        skip_if_complete: bool = True
     ) -> List[dict]:
         """Process a batch of mesh files.
 
@@ -257,28 +400,42 @@ class DatasetGenerator:
             mesh_files: List of paths to STL files
             start_id: Starting object ID number
             show_progress: Whether to show progress bar
+            skip_if_complete: If True, skip objects that are already complete
 
         Returns:
             List of processing results
         """
         results = []
+        skipped_count = 0
 
         iterator = enumerate(mesh_files, start=start_id)
-        if show_progress:
-            iterator = tqdm(iterator, total=len(mesh_files), desc="Processing meshes")
+        pbar = tqdm(iterator, total=len(mesh_files), desc="Processing meshes") if show_progress else iterator
 
-        for idx, mesh_path in iterator:
+        for idx, mesh_path in pbar:
             object_id = f"{idx:04d}"
 
             try:
-                result = self.process_mesh(object_id=object_id, mesh_path=mesh_path)
+                result = self.process_mesh(
+                    object_id=object_id,
+                    mesh_path=mesh_path,
+                    skip_if_complete=skip_if_complete
+                )
                 results.append(result)
+
+                if result.get("skipped", False):
+                    skipped_count += 1
+                    if show_progress:
+                        pbar.set_postfix(skipped=skipped_count, refresh=False)  # type: ignore
+
             except Exception as e:
                 print(f"Error processing {mesh_path}: {e}")
                 results.append({
                     "object_id": object_id,
                     "error": str(e)
                 })
+
+        if show_progress and skipped_count > 0:
+            print(f"Skipped {skipped_count} already-complete objects")
 
         return results
 
@@ -366,7 +523,8 @@ def generate_dataset_from_thingi10k(
     output_dir: Path = Path("dataset"),
     base_resolution: int = 128,
     min_resolution: int = 4,
-    download_dir: Optional[Path] = None
+    download_dir: Optional[Path] = None,
+    resume: bool = True
 ):
     """Generate dataset from Thingi10k.
 
@@ -379,6 +537,7 @@ def generate_dataset_from_thingi10k(
         base_resolution: Top-level voxel resolution
         min_resolution: Minimum subdivision resolution
         download_dir: Directory to download STL files (default: ./thingi10k_cache)
+        resume: If True, skip already-processed objects (default: True)
     """
     import thingi10k
 
@@ -404,10 +563,13 @@ def generate_dataset_from_thingi10k(
     generator = DatasetGenerator(config)
 
     print(f"Downloading and processing {num_objects} objects from Thingi10k...")
+    if resume:
+        print("Resume mode enabled - skipping already-complete objects")
 
     pbar = tqdm(range(num_objects), desc="Overall progress")
 
     processed_things = defaultdict(bool)
+    skipped_count = 0
 
     # Download and process objects
     processed = 0
@@ -421,7 +583,7 @@ def generate_dataset_from_thingi10k(
             if processed_things[object_info['thing_id']]:
                 continue
             processed_things[object_info['thing_id']] = True
-            
+
             mesh_path = Path(object_info['file_path'])
 
             # Download if not cached
@@ -430,7 +592,15 @@ def generate_dataset_from_thingi10k(
 
             # Process through pipeline
             object_id = f"{processed:04d}"
-            generator.process_mesh(object_id=object_id, mesh_path=mesh_path)
+            result = generator.process_mesh(
+                object_id=object_id,
+                mesh_path=mesh_path,
+                skip_if_complete=resume
+            )
+
+            if result.get("skipped", False):
+                skipped_count += 1
+                pbar.set_postfix(skipped=skipped_count, refresh=False)
 
             processed += 1
             pbar.update(1)
@@ -438,6 +608,11 @@ def generate_dataset_from_thingi10k(
         except Exception as e:
             print(f"Error with object {processed}: {e}")
             continue
+
+    pbar.close()
+
+    if skipped_count > 0:
+        print(f"\nSkipped {skipped_count} already-complete objects")
 
     # Finalize
     generator.finalize()

@@ -51,7 +51,8 @@ class MetadataWriter:
         output_path: Path,
         object_id: str,
         source_file: str,
-        voxel_metadata: Dict
+        voxel_metadata: Dict,
+        source_hash: Optional[str] = None
     ):
         """Write object-level metadata.
 
@@ -60,6 +61,7 @@ class MetadataWriter:
             object_id: Object ID
             source_file: Original STL file path
             voxel_metadata: Metadata from voxelization
+            source_hash: Hash of source mesh for resume verification (optional)
         """
         metadata = {
             "object_id": object_id,
@@ -71,6 +73,10 @@ class MetadataWriter:
             "num_occupied_voxels": voxel_metadata.get("num_occupied_voxels"),
             "occupancy_ratio": voxel_metadata.get("occupancy_ratio"),
         }
+
+        # Add source hash if provided (for resume support)
+        if source_hash is not None:
+            metadata["source_hash"] = source_hash
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
