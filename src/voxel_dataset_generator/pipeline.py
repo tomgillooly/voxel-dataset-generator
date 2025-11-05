@@ -56,7 +56,6 @@ class DatasetGenerator:
 
         # Statistics
         self.num_processed = 0
-        self._processed_object_ids = []  # Track object IDs for split assignment
 
     def _compute_source_hash(self, mesh_path: Optional[Path] = None,
                             vertices: Optional[np.ndarray] = None,
@@ -169,7 +168,7 @@ class DatasetGenerator:
 
         Args:
             object_ids: List of object IDs to assign splits to.
-                       If None, uses processed object IDs from tracking.
+                       If None, discovers all objects from the output directory.
 
         Returns:
             HierarchicalSplitter instance with splits assigned
@@ -178,7 +177,26 @@ class DatasetGenerator:
             return None
 
         if object_ids is None:
-            object_ids = self._processed_object_ids
+            # Discover all object IDs from the output directory
+            objects_dir = self.config.output_dir / "objects"
+            if not objects_dir.exists():
+                print("No objects directory found")
+                return None
+
+            # Find all object directories (e.g., "object_0001", "object_0002", etc.)
+            # Extract just the ID part (e.g., "0001", "0002")
+            object_ids = []
+            for d in sorted(objects_dir.iterdir()):
+                if d.is_dir() and d.name.startswith("object_"):
+                    # Extract ID from "object_0001" -> "0001"
+                    obj_id = d.name.replace("object_", "")
+                    object_ids.append(obj_id)
+
+            if not object_ids:
+                print("No objects found in output directory")
+                return None
+
+            print(f"Discovered {len(object_ids)} objects from {objects_dir}")
 
         if not object_ids:
             print("No objects to assign splits to")
@@ -295,10 +313,6 @@ class DatasetGenerator:
             with open(metadata_path, 'r') as f:
                 metadata = json.load(f)
 
-            # Track for splitting if needed
-            if self.config.enable_splitting and object_id not in self._processed_object_ids:
-                self._processed_object_ids.append(object_id)
-
             self.num_processed += 1
 
             return {
@@ -336,10 +350,6 @@ class DatasetGenerator:
                 voxel_path,
                 compressed=self.config.compression
             )
-
-        # Track object for splitting
-        if self.config.enable_splitting and object_id not in self._processed_object_ids:
-            self._processed_object_ids.append(object_id)
 
         # Step 2: Subdivide into hierarchy
         # Note: Subdivisions use views (not copies) for memory efficiency
@@ -470,8 +480,9 @@ class DatasetGenerator:
     def finalize(self):
         """Finalize dataset generation by writing global metadata."""
         # Assign splits by reading from disk (memory-efficient approach)
+        # This will auto-discover all objects in the output directory
         splitter = None
-        if self.config.enable_splitting and self._processed_object_ids:
+        if self.config.enable_splitting:
             splitter = self.assign_splits_from_disk()
 
         # Get statistics from registry
@@ -544,6 +555,70 @@ class DatasetGenerator:
                   f"All={hash_dist['all_splits']}")
             print(f"  Trivial hashes (shared across all splits): "
                   f"{split_stats['trivial_hashes']['count']}")
+
+
+def reassign_splits(
+    output_dir: Path,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.2,
+    test_ratio: float = 0.0,
+    seed: Optional[int] = 42
+):
+    """
+    Reassign train/val/test splits for an existing dataset.
+
+    This is useful if you want to change the split ratios or seed after
+    dataset generation is complete.
+
+    Args:
+        output_dir: Dataset output directory
+        train_ratio: Ratio of objects for training split
+        val_ratio: Ratio of objects for validation split
+        test_ratio: Ratio of objects for test split
+        seed: Random seed for split assignment
+
+    Example:
+        >>> # Reassign splits with different ratios
+        >>> reassign_splits(
+        ...     output_dir=Path("dataset"),
+        ...     train_ratio=0.7,
+        ...     val_ratio=0.2,
+        ...     test_ratio=0.1,
+        ...     seed=123
+        ... )
+    """
+    print(f"Reassigning splits for dataset at {output_dir}")
+
+    # Create a temporary config and generator just for split assignment
+    config = Config(output_dir=output_dir)
+    generator = DatasetGenerator(config)
+
+    # Override the split config
+    generator.split_config = SplitConfig(
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed
+    )
+    generator.config.enable_splitting = True
+
+    # Assign splits (will auto-discover all objects)
+    splitter = generator.assign_splits_from_disk()
+
+    if splitter is not None:
+        # Save the new split assignments
+        split_path = output_dir / "splits.json"
+        splitter.save_split_assignments(split_path)
+        print(f"\nSaved new split assignments to {split_path}")
+
+        # Print statistics
+        split_stats = splitter.get_split_statistics()
+        print(f"\nSplit statistics:")
+        print(f"  Objects: Train={split_stats['objects']['train']}, "
+              f"Val={split_stats['objects']['val']}, "
+              f"Test={split_stats['objects']['test']}")
+    else:
+        print("Failed to assign splits")
 
 
 def generate_dataset_from_thingi10k(
