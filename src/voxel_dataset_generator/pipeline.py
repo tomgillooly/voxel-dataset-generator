@@ -672,9 +672,10 @@ def generate_dataset_from_thingi10k(
     processed_things = defaultdict(bool)
     skipped_count = 0
 
+    pbar = trange(start_object, min(num_objects+start_object, len(dataset)), desc="Overall progress")
+
     # Download and process objects
-    processed = 0
-    for data_idx in trange(start_object, min(num_objects+start_object, len(dataset)), desc="Overall progress"):
+    for data_idx in pbar:
         try:
             # Download object
             object_info = dataset[data_idx]
@@ -690,7 +691,7 @@ def generate_dataset_from_thingi10k(
                 raise FileNotFoundError(f"File {mesh_path} does not exist locally.")
 
             # Process through pipeline
-            object_id = f"{processed:04d}"
+            object_id = f"{data_idx:04d}"
             result = generator.process_mesh(
                 object_id=object_id,
                 mesh_path=mesh_path,
@@ -702,18 +703,14 @@ def generate_dataset_from_thingi10k(
                 pbar.set_postfix(skipped=skipped_count, refresh=False)
 
         except Exception as e:
-            print(f"Error with object {processed}: {e}")
+            print(f"Error with object {data_idx}: {e}")
             continue
-
-    pbar.close()
 
     if skipped_count > 0:
         print(f"\nSkipped {skipped_count} already-complete objects")
 
     # Finalize
     generator.finalize()
-
-    print(f"\nSuccessfully processed {processed}/{num_objects} objects")
 
 
 def main():
