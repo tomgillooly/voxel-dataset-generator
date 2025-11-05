@@ -104,12 +104,13 @@ class Subdivider:
         for i in [0, half]:
             for j in [0, half]:
                 for k in [0, half]:
-                    # Extract sub-volume
+                    # Extract sub-volume (use view, not copy, for memory efficiency)
+                    # Note: Data will be copied when saved to disk if needed
                     sub_data = voxel_grid[
                         i:i + half,
                         j:j + half,
                         k:k + half
-                    ].copy()
+                    ]
 
                     # Compute hash and check if empty
                     data_hash = self.compute_hash(sub_data)

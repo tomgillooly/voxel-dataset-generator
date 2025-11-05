@@ -342,10 +342,8 @@ class DatasetGenerator:
             self._processed_object_ids.append(object_id)
 
         # Step 2: Subdivide into hierarchy
+        # Note: Subdivisions use views (not copies) for memory efficiency
         subdivisions = self.subdivider.subdivide_all_levels(voxel_grid)
-
-        # Free voxel_grid memory immediately after subdivision
-        del voxel_grid
 
         # Step 3: Register sub-volumes and deduplicate
         subdivision_records = []
@@ -406,7 +404,9 @@ class DatasetGenerator:
             "occupancy_ratio": voxel_metadata["occupancy_ratio"],
         }
 
-        # Free memory from subdivisions
+        # Free memory from subdivisions and voxel grid
+        # Safe to delete now that all subvolumes have been saved to disk
+        del voxel_grid
         del subdivisions
         del subdivision_records
 

@@ -71,7 +71,9 @@ class SubvolumeRegistry:
         if save_to_disk:
             file_path = self._get_subvolume_path(level, data_hash)
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(file_path, voxels=voxel_data)
+            # Ensure we save a copy if voxel_data is a view (numpy handles this automatically)
+            # but we make it explicit for clarity
+            np.savez_compressed(file_path, voxels=np.asarray(voxel_data))
 
         # Add to registry
         self._registry[data_hash] = {
