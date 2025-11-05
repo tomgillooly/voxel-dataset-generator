@@ -1,5 +1,6 @@
 """Main pipeline for generating hierarchical voxel datasets."""
 
+import gc
 import numpy as np
 from pathlib import Path
 from typing import Optional, List
@@ -43,21 +44,19 @@ class DatasetGenerator:
         self.subdivider = Subdivider(min_resolution=self.config.min_resolution)
         self.registry = SubvolumeRegistry(base_dir=self.config.output_dir)
 
-        # Initialize splitter if splitting is enabled
-        self.splitter = None
+        # Store split config for later use (splitting happens post-processing)
+        self.split_config = None
         if self.config.enable_splitting:
-            split_config = SplitConfig(
+            self.split_config = SplitConfig(
                 train_ratio=self.config.train_ratio,
                 val_ratio=self.config.val_ratio,
                 test_ratio=self.config.test_ratio,
                 seed=self.config.split_seed
             )
-            self.splitter = HierarchicalSplitter(split_config)
 
         # Statistics
         self.num_processed = 0
-        self._object_ids_pending_split = []  # Track objects before assigning splits
-        self._pending_subvolume_registrations = []  # Track subvolumes to register after splits assigned
+        self._processed_object_ids = []  # Track object IDs for split assignment
 
     def _compute_source_hash(self, mesh_path: Optional[Path] = None,
                             vertices: Optional[np.ndarray] = None,
@@ -160,46 +159,81 @@ class DatasetGenerator:
 
         return True
 
-    def assign_splits(self, object_ids: Optional[List[str]] = None):
+    def assign_splits_from_disk(self, object_ids: Optional[List[str]] = None):
         """
-        Assign train/val/test splits to objects.
+        Assign train/val/test splits to objects by reading subdivision maps from disk.
 
-        This should be called after all objects have been added but before
-        processing them, or can be called automatically during finalize().
+        This is a memory-efficient approach that doesn't require holding subvolume
+        data in memory during subdivision. It reads the saved subdivision maps to
+        register which subvolumes belong to which objects.
 
         Args:
             object_ids: List of object IDs to assign splits to.
-                       If None, uses pending object IDs from processing.
+                       If None, uses processed object IDs from tracking.
+
+        Returns:
+            HierarchicalSplitter instance with splits assigned
         """
-        if not self.config.enable_splitting or self.splitter is None:
-            return
+        if not self.config.enable_splitting or self.split_config is None:
+            return None
 
         if object_ids is None:
-            object_ids = self._object_ids_pending_split
+            object_ids = self._processed_object_ids
 
         if not object_ids:
             print("No objects to assign splits to")
-            return
+            return None
 
-        self.splitter.assign_splits(object_ids)
-        print(f"Assigned splits to {len(object_ids)} objects")
-        print(f"  Train: {len(self.splitter.get_objects_by_split(Split.TRAIN))}")
-        print(f"  Val: {len(self.splitter.get_objects_by_split(Split.VAL))}")
+        print(f"\nAssigning splits to {len(object_ids)} objects...")
+
+        # Create splitter and assign object-level splits
+        splitter = HierarchicalSplitter(self.split_config)
+        splitter.assign_splits(object_ids)
+
+        print(f"  Train: {len(splitter.get_objects_by_split(Split.TRAIN))}")
+        print(f"  Val: {len(splitter.get_objects_by_split(Split.VAL))}")
         if self.config.test_ratio > 0:
-            print(f"  Test: {len(self.splitter.get_objects_by_split(Split.TEST))}")
+            print(f"  Test: {len(splitter.get_objects_by_split(Split.TEST))}")
 
-        # Register all pending subvolumes now that objects have splits
-        if self._pending_subvolume_registrations:
-            print(f"Registering {len(self._pending_subvolume_registrations)} pending subvolumes...")
-            for reg in self._pending_subvolume_registrations:
-                self.splitter.register_subvolume(
-                    object_id=reg['object_id'],
-                    hash_val=reg['hash_val'],
+        # Register subvolumes by reading subdivision maps from disk
+        print(f"\nRegistering subvolumes from disk...")
+        for obj_id in tqdm(object_ids, desc="Reading subdivision maps"):
+            obj_dir = self.config.get_object_dir(obj_id)
+            subdivision_map_path = obj_dir / "subdivision_map.json"
+
+            if not subdivision_map_path.exists():
+                print(f"Warning: Subdivision map not found for object {obj_id}")
+                continue
+
+            # Read subdivision map
+            with open(subdivision_map_path, 'r') as f:
+                subdivision_records = json.load(f)
+
+            # Register each subvolume hash
+            # Track unique hashes per object to avoid duplicate registrations
+            registered_hashes = set()
+            for record in subdivision_records:
+                hash_val = record['hash']
+
+                # Skip if already registered for this object
+                if hash_val in registered_hashes:
+                    continue
+                registered_hashes.add(hash_val)
+
+                # Determine if trivial based on is_empty flag
+                # Note: We approximate triviality with is_empty for memory efficiency
+                # A more accurate check would require loading the voxel data
+                is_trivial = record.get('is_empty', False)
+
+                splitter.register_subvolume(
+                    object_id=obj_id,
+                    hash_val=hash_val,
                     voxel_data=None,
-                    is_trivial=reg['is_trivial']
+                    is_trivial=is_trivial
                 )
-            self._pending_subvolume_registrations.clear()
-            print("Subvolume registration complete")
+
+        print("Subvolume registration complete")
+        return splitter
 
     def process_mesh(
         self,
@@ -262,8 +296,8 @@ class DatasetGenerator:
                 metadata = json.load(f)
 
             # Track for splitting if needed
-            if self.config.enable_splitting and object_id not in self._object_ids_pending_split:
-                self._object_ids_pending_split.append(object_id)
+            if self.config.enable_splitting and object_id not in self._processed_object_ids:
+                self._processed_object_ids.append(object_id)
 
             self.num_processed += 1
 
@@ -304,11 +338,14 @@ class DatasetGenerator:
             )
 
         # Track object for splitting
-        if self.config.enable_splitting and object_id not in self._object_ids_pending_split:
-            self._object_ids_pending_split.append(object_id)
+        if self.config.enable_splitting and object_id not in self._processed_object_ids:
+            self._processed_object_ids.append(object_id)
 
         # Step 2: Subdivide into hierarchy
         subdivisions = self.subdivider.subdivide_all_levels(voxel_grid)
+
+        # Free voxel_grid memory immediately after subdivision
+        del voxel_grid
 
         # Step 3: Register sub-volumes and deduplicate
         subdivision_records = []
@@ -316,25 +353,6 @@ class DatasetGenerator:
 
         for level, subvolumes in subdivisions.items():
             for subvol in subvolumes:
-                # Register with splitter if enabled AND object has been assigned a split
-                if self.splitter is not None:
-                    if self.splitter.get_object_split(object_id) is not None:
-                        # Object already has a split, register immediately
-                        self.splitter.register_subvolume(
-                            object_id=object_id,
-                            hash_val=subvol.hash,
-                            voxel_data=subvol.data,
-                            is_trivial=subvol.is_empty or self.splitter.is_trivial_subvolume(subvol.data)
-                        )
-                    else:
-                        # Object doesn't have a split yet, store for later registration
-                        is_trivial = subvol.is_empty or self.splitter.is_trivial_subvolume(subvol.data)
-                        self._pending_subvolume_registrations.append({
-                            'object_id': object_id,
-                            'hash_val': subvol.hash,
-                            'is_trivial': is_trivial
-                        })
-
                 # Register in global registry
                 is_new = self.registry.register(
                     data_hash=subvol.hash,
@@ -380,12 +398,22 @@ class DatasetGenerator:
 
         self.num_processed += 1
 
-        return {
+        # Store result before freeing memory
+        result = {
             "object_id": object_id,
             "num_subvolumes": len(subdivision_records),
             "new_unique_subvolumes": new_unique_count,
             "occupancy_ratio": voxel_metadata["occupancy_ratio"],
         }
+
+        # Free memory from subdivisions
+        del subdivisions
+        del subdivision_records
+
+        # Force garbage collection to free memory immediately
+        gc.collect()
+
+        return result
 
     def process_batch(
         self,
@@ -441,10 +469,10 @@ class DatasetGenerator:
 
     def finalize(self):
         """Finalize dataset generation by writing global metadata."""
-        # Assign splits if not already done
-        if self.config.enable_splitting and self.splitter is not None:
-            if self._object_ids_pending_split:
-                self.assign_splits()
+        # Assign splits by reading from disk (memory-efficient approach)
+        splitter = None
+        if self.config.enable_splitting and self._processed_object_ids:
+            splitter = self.assign_splits_from_disk()
 
         # Get statistics from registry
         stats = self.registry.get_overall_stats()
@@ -478,9 +506,9 @@ class DatasetGenerator:
         self.registry.save_registry()
 
         # Save split assignments if enabled
-        if self.splitter is not None:
+        if splitter is not None:
             split_path = self.config.output_dir / "splits.json"
-            self.splitter.save_split_assignments(split_path)
+            splitter.save_split_assignments(split_path)
             print(f"\nSaved split assignments to {split_path}")
 
         print(f"\nDataset generation complete!")
@@ -497,9 +525,9 @@ class DatasetGenerator:
                   f"({level_stats['deduplication_ratio']:.2%} dedup ratio)")
 
         # Print split statistics if enabled
-        if self.splitter is not None:
+        if splitter is not None:
             print("\nSplit statistics:")
-            split_stats = self.splitter.get_split_statistics()
+            split_stats = splitter.get_split_statistics()
             print(f"  Objects: Train={split_stats['objects']['train']}, "
                   f"Val={split_stats['objects']['val']}, "
                   f"Test={split_stats['objects']['test']}")
