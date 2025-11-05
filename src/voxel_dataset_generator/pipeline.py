@@ -4,7 +4,7 @@ import gc
 import numpy as np
 from pathlib import Path
 from typing import Optional, List
-from tqdm import tqdm
+from tqdm import tqdm, trange
 import hashlib
 import json
 
@@ -547,6 +547,7 @@ class DatasetGenerator:
 
 
 def generate_dataset_from_thingi10k(
+    start_object: int = 0,
     num_objects: int = 100,
     output_dir: Path = Path("dataset"),
     base_resolution: int = 128,
@@ -574,9 +575,8 @@ def generate_dataset_from_thingi10k(
     download_dir.mkdir(exist_ok=True)
 
     # Initialize Thingi10k dataset
-    thingi10k.init(variant='raw')
+    thingi10k.init(variant='raw', cache_dir=download_dir)
     dataset = thingi10k.dataset()
-    data_iter = iter(dataset)
 
     # Create configuration
     config = Config(
@@ -594,20 +594,16 @@ def generate_dataset_from_thingi10k(
     if resume:
         print("Resume mode enabled - skipping already-complete objects")
 
-    pbar = tqdm(range(num_objects), desc="Overall progress")
-
     processed_things = defaultdict(bool)
     skipped_count = 0
 
     # Download and process objects
     processed = 0
-    while processed < num_objects:
+    for data_idx in trange(start_object, min(num_objects+start_object, len(dataset)), desc="Overall progress"):
         try:
             # Download object
-            try:
-                object_info = next(data_iter)
-            except StopIteration:
-                break
+            object_info = dataset[data_idx]
+                
             if processed_things[object_info['thing_id']]:
                 continue
             processed_things[object_info['thing_id']] = True
@@ -629,9 +625,6 @@ def generate_dataset_from_thingi10k(
             if result.get("skipped", False):
                 skipped_count += 1
                 pbar.set_postfix(skipped=skipped_count, refresh=False)
-
-            processed += 1
-            pbar.update(1)
 
         except Exception as e:
             print(f"Error with object {processed}: {e}")
@@ -656,6 +649,12 @@ def main():
         description="Generate hierarchical voxel dataset from Thingi10k"
     )
     parser.add_argument(
+        "--start-object",
+        type=int,
+        default=0,
+        help="Object index to start processing at"
+    )
+    parser.add_argument(
         "--num-objects",
         type=int,
         default=100,
@@ -670,7 +669,7 @@ def main():
     parser.add_argument(
         "--resolution",
         type=int,
-        default=128,
+        default=256,
         help="Base resolution (must be power of 2)"
     )
     parser.add_argument(
@@ -683,6 +682,7 @@ def main():
     args = parser.parse_args()
 
     generate_dataset_from_thingi10k(
+        start_object=args.start_object,
         num_objects=args.num_objects,
         output_dir=args.output_dir,
         base_resolution=args.resolution,
