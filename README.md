@@ -18,6 +18,7 @@ This tool converts 3D meshes (STL files) into hierarchical voxel datasets by:
 - **Efficient Deduplication**: Hash-based identification of unique sub-volumes
 - **Analysis-Ready**: Flat JSON structure optimized for Polars/Pandas dataframes
 - **Thingi10k Integration**: Built-in support for downloading and processing Thingi10k dataset
+- **GPU Ray Tracing** ⚡: OptiX-accelerated ray tracing through voxels with transparency and distance accumulation (see [optix_raytracer/](optix_raytracer/))
 
 ## Installation
 
@@ -163,6 +164,38 @@ Then open `visualize_dataset.ipynb` for an **interactive hierarchical explorer**
 - **Global Position Tracking** - Clear breadcrumb navigation showing your path through the tree
 
 See [VISUALIZATION.md](VISUALIZATION.md) for complete guide.
+
+## OptiX Ray Tracing (Optional)
+
+High-performance GPU ray tracing for voxel grids is available via the OptiX module. Ray trace through voxels treating them as transparent and accumulate distance traveled through the object.
+
+```python
+from optix_voxel_tracer import VoxelRayTracer
+import numpy as np
+
+# Load voxel grid
+voxels = np.load("dataset/objects/object_0001/level_0.npz")['voxels']
+
+# Create tracer
+tracer = VoxelRayTracer(voxels)
+
+# Trace rays and get accumulated distances
+distances = tracer.trace_rays(origins, directions)
+```
+
+**Features**:
+- GPU-accelerated with NVIDIA OptiX
+- Transparent voxel traversal
+- Distance accumulation through occupied voxels
+- Multiple viewpoint rendering
+- Batch processing support
+
+**See**:
+- [optix_raytracer/QUICKSTART.md](optix_raytracer/QUICKSTART.md) - Build and usage guide
+- [OPTIX_INTEGRATION.md](OPTIX_INTEGRATION.md) - Integration with dataset pipeline
+- [optix_raytracer/examples/](optix_raytracer/examples/) - Example scripts
+
+**Requirements**: NVIDIA GPU (RTX series), CUDA 11.0+, OptiX SDK 7.0+
 
 ## Examples
 
