@@ -112,6 +112,19 @@ bool OptixSetup::createModules(const std::string& ptx_file) {
     char log[2048];
     size_t log_size = sizeof(log);
 
+    // Use optixModuleCreate for OptiX 8.0+, optixModuleCreateFromPTX for OptiX 7.x
+    #if OPTIX_VERSION >= 80000
+    OPTIX_CHECK(optixModuleCreate(
+        m_context,
+        &module_compile_options,
+        &pipeline_compile_options,
+        ptx_code.c_str(),
+        ptx_code.size(),
+        log,
+        &log_size,
+        &m_module
+    ));
+    #else
     OPTIX_CHECK(optixModuleCreateFromPTX(
         m_context,
         &module_compile_options,
@@ -122,6 +135,7 @@ bool OptixSetup::createModules(const std::string& ptx_file) {
         &log_size,
         &m_module
     ));
+    #endif
 
     if (log_size > 1) {
         std::cout << "Module creation log:\n" << log << std::endl;
@@ -198,11 +212,37 @@ bool OptixSetup::linkPipeline() {
 
     OptixPipelineLinkOptions pipeline_link_options = {};
     pipeline_link_options.maxTraceDepth = 1;
+    // debugLevel was removed in OptiX 8.0
+    #if OPTIX_VERSION < 80000
     pipeline_link_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_MINIMAL;
+    #endif
 
     char log[2048];
     size_t log_size = sizeof(log);
 
+    // Pipeline creation API changed in OptiX 8.0
+    #if OPTIX_VERSION >= 80000
+    // OptiX 8.0+ requires pipeline compile options
+    OptixPipelineCompileOptions pipeline_compile_options_for_link = {};
+    pipeline_compile_options_for_link.usesMotionBlur = false;
+    pipeline_compile_options_for_link.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+    pipeline_compile_options_for_link.numPayloadValues = 2;
+    pipeline_compile_options_for_link.numAttributeValues = 2;
+    pipeline_compile_options_for_link.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
+    pipeline_compile_options_for_link.pipelineLaunchParamsVariableName = "params";
+
+    OPTIX_CHECK(optixPipelineCreate(
+        m_context,
+        &pipeline_compile_options_for_link,
+        &pipeline_link_options,
+        program_groups,
+        sizeof(program_groups) / sizeof(program_groups[0]),
+        log,
+        &log_size,
+        &m_pipeline
+    ));
+    #else
+    // OptiX 7.x
     OPTIX_CHECK(optixPipelineCreate(
         m_context,
         nullptr,  // No compile options needed here
@@ -213,6 +253,7 @@ bool OptixSetup::linkPipeline() {
         &log_size,
         &m_pipeline
     ));
+    #endif
 
     if (log_size > 1) {
         std::cout << "Pipeline creation log:\n" << log << std::endl;
