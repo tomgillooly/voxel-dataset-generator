@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 // PTX directory is defined by CMake
 #ifndef PTX_DIR
@@ -205,13 +206,16 @@ std::vector<float> VoxelRayTracer::traceRays(const std::vector<float>& ray_origi
     CUDA_CHECK(cudaMemcpy(m_params_device, &m_params,
                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
 
+    // Get SBT (avoid taking address of temporary)
+    OptixShaderBindingTable sbt = m_optix_setup->getSBT();
+
     // Launch OptiX
     OPTIX_CHECK(optixLaunch(
         m_optix_setup->getPipeline(),
         0,  // CUDA stream
         reinterpret_cast<CUdeviceptr>(m_params_device),
         sizeof(LaunchParams),
-        &m_optix_setup->getSBT(),
+        &sbt,
         width,
         height,
         1  // depth
