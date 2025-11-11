@@ -1,13 +1,42 @@
 #include "voxel_tracer.h"
 #include <iostream>
+#include <fstream>
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <vector>
+#include <string>
 
-// PTX directory is defined by CMake
+// PTX directory is defined by CMake at build time
+// At runtime, we'll search multiple locations
 #ifndef PTX_DIR
 #define PTX_DIR "./ptx"
 #endif
+
+// Helper function to find PTX directory
+static std::string find_ptx_directory() {
+    std::vector<std::string> search_paths = {
+        PTX_DIR,                                    // CMake-defined build directory
+        "./ptx",                                     // Current directory
+        "../ptx",                                    // Parent directory
+        "../../ptx",                                 // Two levels up
+        "./optix_raytracer/build/ptx",              // Relative to project root
+        "../build/ptx",                              // Relative to optix_raytracer dir
+        "build/ptx"                                  // Relative to optix_raytracer dir
+    };
+
+    // Check each path
+    for (const auto& path : search_paths) {
+        std::string test_file = path + "/voxel_programs.ptx";
+        std::ifstream test(test_file);
+        if (test.good()) {
+            return path;
+        }
+    }
+
+    // Return default if not found (will error later with better message)
+    return PTX_DIR;
+}
 
 VoxelRayTracer::VoxelRayTracer(const std::vector<unsigned char>& voxel_data,
                                int res_x, int res_y, int res_z,
@@ -38,8 +67,8 @@ void VoxelRayTracer::initialize() {
             throw std::runtime_error("Failed to initialize OptiX");
         }
 
-        // Create pipeline
-        std::string ptx_dir = PTX_DIR;
+        // Create pipeline - find PTX directory
+        std::string ptx_dir = find_ptx_directory();
         if (!m_optix_setup->createPipeline(ptx_dir)) {
             throw std::runtime_error("Failed to create OptiX pipeline");
         }
