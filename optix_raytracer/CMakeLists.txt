@@ -24,6 +24,37 @@ if(NOT EXISTS ${OptiX_INCLUDE_DIR}/optix.h)
     message(FATAL_ERROR "OptiX headers not found at ${OptiX_INCLUDE_DIR}")
 endif()
 
+# Find OptiX stubs library (required for optixInit and function table)
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(OPTIX_LIB_ARCH "64")
+else()
+    set(OPTIX_LIB_ARCH "")
+endif()
+
+# Look for stubs library in SDK
+find_library(OptiX_STUBS_LIBRARY
+    NAMES optix.1 optix_stubs
+    PATHS
+        ${OptiX_INSTALL_DIR}/lib${OPTIX_LIB_ARCH}
+        ${OptiX_INSTALL_DIR}/lib
+        ${OptiX_INSTALL_DIR}/SDK/lib${OPTIX_LIB_ARCH}
+        ${OptiX_INSTALL_DIR}/SDK/lib
+    NO_DEFAULT_PATH
+)
+
+if(NOT OptiX_STUBS_LIBRARY)
+    # Try system paths as fallback
+    find_library(OptiX_STUBS_LIBRARY
+        NAMES optix.1 optix_stubs
+    )
+endif()
+
+if(OptiX_STUBS_LIBRARY)
+    message(STATUS "Found OptiX stubs library: ${OptiX_STUBS_LIBRARY}")
+else()
+    message(WARNING "OptiX stubs library not found. Looking for optix_stubs.h (header-only mode)")
+endif()
+
 message(STATUS "Found OptiX: ${OptiX_INCLUDE_DIR}")
 message(STATUS "Found CUDA: ${CUDA_TOOLKIT_ROOT_DIR}")
 
@@ -99,10 +130,36 @@ set(CORE_HEADERS
 
 # Core library
 add_library(optix_voxel_tracer_core SHARED ${CORE_SOURCES} ${CORE_HEADERS})
-target_link_libraries(optix_voxel_tracer_core
+
+# Link libraries
+set(LINK_LIBRARIES
     ${CUDA_LIBRARIES}
     ${CUDA_CUDA_LIBRARY}
+    ${CMAKE_DL_LIBS}  # Required for dlopen/dlsym used by OptiX
 )
+
+# Add OptiX stubs if found
+if(OptiX_STUBS_LIBRARY)
+    list(APPEND LINK_LIBRARIES ${OptiX_STUBS_LIBRARY})
+endif()
+
+target_link_libraries(optix_voxel_tracer_core ${LINK_LIBRARIES})
+
+# Set RPATH so library can find CUDA/OptiX libraries at runtime
+set_target_properties(optix_voxel_tracer_core PROPERTIES
+    BUILD_RPATH "${CUDA_TOOLKIT_ROOT_DIR}/lib64:${CUDA_TOOLKIT_ROOT_DIR}/lib"
+    INSTALL_RPATH "${CUDA_TOOLKIT_ROOT_DIR}/lib64:${CUDA_TOOLKIT_ROOT_DIR}/lib"
+)
+
+# If OptiX stubs library found, add its directory to RPATH
+if(OptiX_STUBS_LIBRARY)
+    get_filename_component(OptiX_LIB_DIR ${OptiX_STUBS_LIBRARY} DIRECTORY)
+    set_target_properties(optix_voxel_tracer_core PROPERTIES
+        BUILD_RPATH "${CUDA_TOOLKIT_ROOT_DIR}/lib64:${CUDA_TOOLKIT_ROOT_DIR}/lib:${OptiX_LIB_DIR}"
+        INSTALL_RPATH "${CUDA_TOOLKIT_ROOT_DIR}/lib64:${CUDA_TOOLKIT_ROOT_DIR}/lib:${OptiX_LIB_DIR}"
+    )
+endif()
+
 target_compile_definitions(optix_voxel_tracer_core PRIVATE
     PTX_DIR="${CUDA_GENERATED_OUTPUT_DIR}"
 )
