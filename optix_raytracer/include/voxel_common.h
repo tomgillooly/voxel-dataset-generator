@@ -54,9 +54,11 @@ enum { RAY_TYPE_RADIANCE = 0, RAY_TYPE_COUNT };
 #ifdef __CUDACC__
 
 // Convert 3D voxel coordinates to linear index
+// NumPy arrays are stored in C-order (row-major): [z][y][x]
+// So linear index is: z * (res_y * res_x) + y * res_x + x
 __device__ __forceinline__
 int voxel_index(int x, int y, int z, const int3& resolution) {
-    return x + resolution.x * (y + resolution.y * z);
+    return z * (resolution.y * resolution.x) + y * resolution.x + x;
 }
 
 // Check if a point is inside the grid bounds
