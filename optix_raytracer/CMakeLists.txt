@@ -80,7 +80,38 @@ include_directories(
 
 # CUDA flags
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
-set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89)  # Turing, Ampere, Ada Lovelace
+
+# Auto-detect GPU architecture or use common ones
+# OptiX 7+ requires at least sm_50 (Maxwell)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    # Try to detect GPU architecture
+    execute_process(
+        COMMAND nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+        OUTPUT_VARIABLE GPU_ARCH_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+
+    if(GPU_ARCH_OUTPUT)
+        # Convert "7.5" to "75"
+        string(REPLACE "." "" GPU_ARCH_NUM ${GPU_ARCH_OUTPUT})
+        string(STRIP ${GPU_ARCH_NUM} GPU_ARCH_NUM)
+        message(STATUS "Detected GPU architecture: sm_${GPU_ARCH_NUM}")
+        set(CMAKE_CUDA_ARCHITECTURES ${GPU_ARCH_NUM})
+    else()
+        # Default to common architectures (Pascal through Ada Lovelace)
+        # sm_60: Pascal (P100, GTX 1080)
+        # sm_70: Volta (V100)
+        # sm_75: Turing (RTX 20xx, T4)
+        # sm_80: Ampere (A100, RTX 30xx)
+        # sm_86: Ampere (RTX 30xx consumer)
+        # sm_89: Ada Lovelace (RTX 40xx)
+        message(STATUS "Could not detect GPU, using default architectures")
+        set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86 89)
+    endif()
+endif()
+
+message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
 # Generate PTX from CUDA files
 set(CUDA_GENERATED_OUTPUT_DIR ${CMAKE_BINARY_DIR}/ptx)
@@ -90,6 +121,9 @@ file(MAKE_DIRECTORY ${CUDA_GENERATED_OUTPUT_DIR})
 set(CUDA_PROGRAMS
     ${CMAKE_CURRENT_SOURCE_DIR}/cuda/voxel_programs.cu
 )
+
+# Get the lowest architecture for PTX compilation (for maximum compatibility)
+list(GET CMAKE_CUDA_ARCHITECTURES 0 MIN_CUDA_ARCH)
 
 foreach(cuda_file ${CUDA_PROGRAMS})
     get_filename_component(cuda_file_base ${cuda_file} NAME_WE)
@@ -104,11 +138,11 @@ foreach(cuda_file ${CUDA_PROGRAMS})
                 -I${OptiX_INCLUDE_DIR}
                 -I${CUDA_INCLUDE_DIRS}
                 -I${CMAKE_CURRENT_SOURCE_DIR}/include
-                --gpu-architecture=compute_75
+                --gpu-architecture=compute_${MIN_CUDA_ARCH}
                 -o ${ptx_file}
                 ${cuda_file}
         DEPENDS ${cuda_file}
-        COMMENT "Compiling ${cuda_file} to PTX"
+        COMMENT "Compiling ${cuda_file} to PTX (sm_${MIN_CUDA_ARCH})"
     )
 
     list(APPEND PTX_FILES ${ptx_file})
