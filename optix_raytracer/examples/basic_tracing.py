@@ -13,14 +13,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "build"))
 from optix_voxel_tracer import VoxelRayTracer
 
 
-def generate_orthographic_rays(resolution, grid_size=1.0, distance=2.0):
+def generate_orthographic_rays(resolution, grid_size=64.0, distance=100.0):
     """
     Generate orthographic rays pointing down (-Z direction).
 
     Args:
         resolution: Tuple (width, height) for ray grid
-        grid_size: Size of the grid in world space
-        distance: Distance from which to cast rays
+        grid_size: Size of the ray grid in world space (should match voxel grid extent)
+        distance: Distance from which to cast rays (should be outside grid bounds)
 
     Returns:
         origins: (H, W, 3) array of ray origins
@@ -28,13 +28,13 @@ def generate_orthographic_rays(resolution, grid_size=1.0, distance=2.0):
     """
     h, w = resolution
 
-    # Create grid of ray origins
+    # Create grid of ray origins spanning the voxel grid
     x = np.linspace(-grid_size/2, grid_size/2, w, dtype=np.float32)
     y = np.linspace(-grid_size/2, grid_size/2, h, dtype=np.float32)
 
     xx, yy = np.meshgrid(x, y)
 
-    # Origins at fixed Z distance
+    # Origins at fixed Z distance (above the grid)
     origins = np.zeros((h, w, 3), dtype=np.float32)
     origins[:, :, 0] = xx
     origins[:, :, 1] = yy
@@ -134,15 +134,15 @@ def main():
     print("Example 2: Side view")
     print("="*60)
 
-    # Generate rays from the side
+    # Generate rays from the side (outside the grid which extends to +/-32)
     origins2 = np.zeros((256, 256, 3), dtype=np.float32)
     directions2 = np.zeros((256, 256, 3), dtype=np.float32)
 
     for i in range(256):
         for j in range(256):
-            y = (i / 256.0) * 2 - 1
-            z = (j / 256.0) * 2 - 1
-            origins2[i, j] = [2.0, y, z]  # From +X side
+            y = (i / 256.0) * 64 - 32  # -32 to +32
+            z = (j / 256.0) * 64 - 32  # -32 to +32
+            origins2[i, j] = [100.0, y, z]  # From +X side, outside grid
             directions2[i, j] = [-1.0, 0, 0]  # Point towards -X
 
     distances2 = tracer.trace_rays(origins2, directions2)
