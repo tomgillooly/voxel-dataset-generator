@@ -120,6 +120,7 @@ add_custom_target(ptx_target ALL DEPENDS ${PTX_FILES})
 set(CORE_SOURCES
     src/voxel_tracer.cpp
     src/optix_setup.cpp
+    src/optix_function_table.cpp
 )
 
 set(CORE_HEADERS
