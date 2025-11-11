@@ -73,7 +73,7 @@ def generate_camera_rays(resolution, camera_pos, look_at, up, fov=60.0):
     return origins, directions
 
 
-def render_turntable(tracer, num_views=8, resolution=(512, 512), radius=2.0):
+def render_turntable(tracer, num_views=8, resolution=(512, 512), radius=None):
     """
     Render object from multiple viewpoints in a turntable fashion.
 
@@ -81,11 +81,24 @@ def render_turntable(tracer, num_views=8, resolution=(512, 512), radius=2.0):
         tracer: VoxelRayTracer instance
         num_views: Number of viewpoints around the object
         resolution: (width, height) for rendering
-        radius: Distance from object center
+        radius: Distance from object center (auto-calculated if None)
 
     Returns:
         List of distance images
     """
+    # Auto-calculate radius if not provided
+    if radius is None:
+        info = tracer.get_grid_info()
+        res_z, res_y, res_x = info['resolution']
+        voxel_size = info['voxel_size']
+
+        # Grid extent (assuming centered at origin)
+        max_extent = max(res_x, res_y, res_z) * voxel_size / 2.0
+
+        # Place camera at 2x the max extent to ensure full view
+        radius = max_extent * 2.0
+        print(f"Auto-calculated camera radius: {radius:.1f} (grid max extent: {max_extent:.1f})")
+
     renders = []
 
     for i in range(num_views):
@@ -181,8 +194,8 @@ def main():
     renders = render_turntable(
         tracer,
         num_views=args.num_views,
-        resolution=tuple(args.resolution),
-        radius=2.0
+        resolution=tuple(args.resolution)
+        # radius will be auto-calculated based on grid size
     )
 
     # Save renders
