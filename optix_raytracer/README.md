@@ -216,13 +216,75 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 export PYTHONPATH=/path/to/optix_raytracer/build:$PYTHONPATH
 ```
 
+## Dataset Generation
+
+The `examples/` directory includes scripts for generating ray tracing datasets:
+
+### Single Object Dataset
+
+Generate ray tracing data for a single object at the top level:
+
+```bash
+python examples/generate_dataset.py \
+    --dataset-dir dataset \
+    --object-id 0001 \
+    --sampling-mode sphere \
+    --sphere-divisions 4 \
+    --samples-per-view 3000
+```
+
+**Options:**
+- `--sampling-mode`: `sphere` (spherical viewpoints) or `all_faces` (uniform sampling on all bbox faces)
+- `--sphere-divisions`: Number of azimuth/elevation divisions (default: 4 = 16 viewpoints)
+- `--samples-per-view`: Rays per viewpoint distributed across visible faces
+- `--level`: Voxel grid level to use (default: 0)
+
+**Output:**
+- `ray_dataset/object_XXXX_level_Y_rays.npz`: Ray tracing data
+- Includes: origins, directions, distances, hits, face_ids, view_ids, view_positions
+- Visualization PNG showing ray sampling pattern
+
+### Hierarchical Dataset
+
+Generate ray tracing data for all subvolumes in the hierarchy:
+
+```bash
+python examples/generate_hierarchical_dataset.py \
+    --dataset-dir dataset \
+    --output-dir ray_dataset_hierarchical \
+    --sphere-divisions 4 \
+    --samples-per-view 3000 \
+    --skip-empty
+```
+
+**Options:**
+- `--object-ids`: Specific objects to process (default: all objects)
+- `--min-level`, `--max-level`: Filter by hierarchy level
+- `--skip-empty`: Skip empty subvolumes (recommended)
+
+**Output Structure:**
+```
+ray_dataset_hierarchical/
+├── level_0/
+│   ├── ab/
+│   │   ├── abcd1234...._rays.npz
+│   │   └── abef5678...._rays.npz
+│   └── cd/
+│       └── cdef9012...._rays.npz
+├── level_1/
+│   └── ...
+└── processing_summary.json
+```
+
+Each `.npz` file contains the same fields as single object datasets, organized by level and hash prefix for efficient storage.
+
 ## Examples
 
 See the `examples/` directory:
 - `basic_tracing.py`: Simple ray tracing example
-- `render_orthographic.py`: Generate orthographic projections
-- `render_perspective.py`: Perspective camera rendering
-- `batch_process.py`: Process multiple voxel grids
+- `generate_dataset.py`: Generate ray dataset for single object
+- `generate_hierarchical_dataset.py`: Generate datasets for all subvolumes
+- `render_dataset.py`: Render voxel objects from multiple viewpoints
 
 ## License
 
