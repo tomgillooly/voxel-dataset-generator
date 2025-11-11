@@ -417,40 +417,83 @@ def main():
         print("\nCreating visualization...")
 
         if args.sampling_mode == "turntable":
-            # Visualize per-view distance distributions
+            # Create ragged grid: rows = views, cols = visible faces per view
+            # First, determine which faces are visible from each view
             num_views = args.num_views
-            cols = min(4, num_views)
-            rows = (num_views + cols - 1) // cols
+            max_faces = 6  # Maximum possible faces per view
 
-            fig, axes = plt.subplots(rows, cols, figsize=(cols*4, rows*4))
-            if num_views == 1:
-                axes = np.array([[axes]])
-            elif rows == 1:
-                axes = axes.reshape(1, -1)
+            fig = plt.figure(figsize=(20, 4 * num_views))
+            gs = fig.add_gridspec(num_views, max_faces, hspace=0.4, wspace=0.3)
+
+            face_names = ["-X", "+X", "-Y", "+Y", "-Z", "+Z"]
 
             for view_id in range(num_views):
-                row = view_id // cols
-                col = view_id % cols
-                ax = axes[row, col]
+                # Get all rays for this view
+                view_mask = view_ids == view_id
+                view_face_ids = face_ids[view_mask]
+                view_distances = distances[view_mask]
+                view_hits = hits[view_mask]
+                view_origins = origins[view_mask]
 
-                mask = view_ids == view_id
-                view_distances = distances[mask]
-                view_hits = hits[mask]
+                # Find unique faces for this view (in sorted order)
+                unique_faces = sorted(np.unique(view_face_ids))
 
-                # Histogram of distances
-                ax.hist(view_distances[view_hits > 0], bins=50, alpha=0.7, edgecolor='black')
-                ax.set_title(f'View {view_id} ({np.degrees(view_angles[view_id]):.1f}°)')
-                ax.set_xlabel('Distance')
-                ax.set_ylabel('Count')
-                ax.grid(True, alpha=0.3)
+                # Create subplots for each visible face
+                for col_idx, face_id in enumerate(unique_faces):
+                    ax = fig.add_subplot(gs[view_id, col_idx])
 
-            # Hide unused subplots
-            for view_id in range(num_views, rows * cols):
-                row = view_id // cols
-                col = view_id % cols
-                axes[row, col].axis('off')
+                    # Get rays for this specific face in this view
+                    face_mask = view_face_ids == face_id
+                    face_distances = view_distances[face_mask]
+                    face_hits = view_hits[face_mask]
+                    face_origins = view_origins[face_mask]
 
-            plt.suptitle(f'Object {args.object_id} - Turntable Distance Distributions', fontsize=16)
+                    # Determine which 2 coordinates to use based on face
+                    if face_id in [0, 1]:  # X faces - use Y, Z
+                        x_coord = face_origins[:, 1]  # Y
+                        y_coord = face_origins[:, 2]  # Z
+                        xlabel, ylabel = 'Y', 'Z'
+                    elif face_id in [2, 3]:  # Y faces - use X, Z
+                        x_coord = face_origins[:, 0]  # X
+                        y_coord = face_origins[:, 2]  # Z
+                        xlabel, ylabel = 'X', 'Z'
+                    else:  # Z faces - use X, Y
+                        x_coord = face_origins[:, 0]  # X
+                        y_coord = face_origins[:, 1]  # Y
+                        xlabel, ylabel = 'X', 'Y'
+
+                    # Scatter plot with distance as color
+                    scatter = ax.scatter(x_coord, y_coord, c=face_distances,
+                                       cmap='viridis', s=2, alpha=0.6, vmin=0,
+                                       vmax=distances[hits > 0].max() if (hits > 0).any() else 1)
+
+                    # Title with view angle and face
+                    if col_idx == 0:
+                        ax.set_ylabel(f'View {view_id}\n{np.degrees(view_angles[view_id]):.0f}°\n\n{ylabel}',
+                                    fontsize=10, fontweight='bold')
+                    else:
+                        ax.set_ylabel(ylabel, fontsize=9)
+
+                    ax.set_xlabel(xlabel, fontsize=9)
+                    ax.set_title(f'Face {face_names[face_id]}', fontsize=10)
+                    ax.set_aspect('equal', adjustable='box')
+                    ax.tick_params(labelsize=8)
+
+                    # Add colorbar
+                    cbar = plt.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
+                    cbar.set_label('Distance', fontsize=8)
+                    cbar.ax.tick_params(labelsize=7)
+
+                    # Add hit rate annotation
+                    hit_rate = 100.0 * face_hits.sum() / len(face_hits) if len(face_hits) > 0 else 0
+                    ax.text(0.02, 0.98, f'Hits: {hit_rate:.0f}%',
+                           transform=ax.transAxes, fontsize=8,
+                           verticalalignment='top',
+                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+            plt.suptitle(f'Object {args.object_id} - Turntable Ray Sampling\n'
+                        f'(Rows: Viewpoints, Columns: Visible Faces)',
+                        fontsize=14, fontweight='bold')
 
         else:  # all_faces mode
             fig, axes = plt.subplots(2, 3, figsize=(15, 10))
