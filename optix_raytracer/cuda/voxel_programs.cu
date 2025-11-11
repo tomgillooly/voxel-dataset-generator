@@ -67,10 +67,12 @@ __device__ float trace_voxel_grid(const float3& ray_origin,
     );
 
     // tDelta: distance along ray to cross one voxel boundary
+    // Handle case where ray direction is 0 (ray doesn't move in that dimension)
+    const float MAX_T = 1e20f;
     float3 tDelta = make_float3(
-        fabsf(grid.voxel_size.x * inv_dir.x),
-        fabsf(grid.voxel_size.y * inv_dir.y),
-        fabsf(grid.voxel_size.z * inv_dir.z)
+        (step.x != 0) ? fabsf(grid.voxel_size.x * inv_dir.x) : MAX_T,
+        (step.y != 0) ? fabsf(grid.voxel_size.y * inv_dir.y) : MAX_T,
+        (step.z != 0) ? fabsf(grid.voxel_size.z * inv_dir.z) : MAX_T
     );
 
     // tMax: t value at next voxel boundary for each axis
@@ -81,15 +83,21 @@ __device__ float trace_voxel_grid(const float3& ray_origin,
     );
 
     float3 tMax;
-    tMax.x = (step.x > 0) ?
-        ((voxel_corner.x + grid.voxel_size.x - ray_origin.x) * inv_dir.x) :
-        ((voxel_corner.x - ray_origin.x) * inv_dir.x);
-    tMax.y = (step.y > 0) ?
-        ((voxel_corner.y + grid.voxel_size.y - ray_origin.y) * inv_dir.y) :
-        ((voxel_corner.y - ray_origin.y) * inv_dir.y);
-    tMax.z = (step.z > 0) ?
-        ((voxel_corner.z + grid.voxel_size.z - ray_origin.z) * inv_dir.z) :
-        ((voxel_corner.z - ray_origin.z) * inv_dir.z);
+    tMax.x = (step.x != 0) ?
+        ((step.x > 0) ?
+            ((voxel_corner.x + grid.voxel_size.x - ray_origin.x) * inv_dir.x) :
+            ((voxel_corner.x - ray_origin.x) * inv_dir.x))
+        : MAX_T;
+    tMax.y = (step.y != 0) ?
+        ((step.y > 0) ?
+            ((voxel_corner.y + grid.voxel_size.y - ray_origin.y) * inv_dir.y) :
+            ((voxel_corner.y - ray_origin.y) * inv_dir.y))
+        : MAX_T;
+    tMax.z = (step.z != 0) ?
+        ((step.z > 0) ?
+            ((voxel_corner.z + grid.voxel_size.z - ray_origin.z) * inv_dir.z) :
+            ((voxel_corner.z - ray_origin.z) * inv_dir.z))
+        : MAX_T;
 
     // DDA traversal
     float accumulated_distance = 0.0f;
