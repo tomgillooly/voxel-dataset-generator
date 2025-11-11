@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "cmake>=3.18"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optix-voxel-tracer"
+version = "0.1.0"
+description = "OptiX-based GPU ray tracer for voxel grids with transparency and distance accumulation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "you@example.com"},
+]
+keywords = ["optix", "ray-tracing", "voxels", "gpu", "cuda"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    "numpy>=1.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "matplotlib>=3.7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/tomgillooly/voxel-dataset-generator"
+Documentation = "https://github.com/tomgillooly/voxel-dataset-generator/tree/main/optix_raytracer"
