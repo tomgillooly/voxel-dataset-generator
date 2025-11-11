@@ -17,16 +17,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "build"))
 from optix_voxel_tracer import VoxelRayTracer
 
 
-def sample_rays_turntable(grid_info, num_views, samples_per_view):
+def sample_rays_sphere(grid_info, sphere_divisions, samples_per_view):
     """
-    Generate rays from turntable viewpoints, sampling only visible bbox faces.
+    Generate rays from evenly distributed spherical viewpoints.
 
-    For each viewpoint around the object, samples rays on the 3 visible faces
-    of the bounding box (the faces that face toward the camera).
+    Distributes viewpoints uniformly on a sphere using azimuth and elevation angles.
+    For each viewpoint, samples rays on the visible bounding box faces.
 
     Args:
         grid_info: Dict with 'resolution' and 'voxel_size'
-        num_views: Number of turntable viewpoints
+        sphere_divisions: Number of divisions for both azimuth and elevation
         samples_per_view: Total samples per viewpoint (distributed across visible faces)
 
     Returns:
@@ -34,7 +34,7 @@ def sample_rays_turntable(grid_info, num_views, samples_per_view):
         directions: (N, 3) array of ray directions (toward camera)
         face_ids: (N,) array indicating which face each ray came from (0-5)
         view_ids: (N,) array indicating which viewpoint each ray belongs to
-        view_angles: (num_views,) array of turntable angles in radians
+        view_positions: (num_views, 3) array of camera positions in spherical sampling
     """
     res_z, res_y, res_x = grid_info['resolution']
     voxel_size = grid_info['voxel_size']
@@ -53,96 +53,111 @@ def sample_rays_turntable(grid_info, num_views, samples_per_view):
 
     print(f"Bounding box: min={bbox_min}, max={bbox_max}")
     print(f"Camera radius: {camera_radius:.1f}")
+    print(f"Sphere sampling: {sphere_divisions} azimuth × {sphere_divisions} elevation = {sphere_divisions**2} viewpoints")
 
     origins = []
     directions = []
     face_ids = []
     view_ids = []
-    view_angles = []
+    view_positions = []
 
     samples_per_face = samples_per_view // 3  # Distribute across 3 visible faces
 
-    for view_idx in range(num_views):
-        angle = 2 * np.pi * view_idx / num_views
-        view_angles.append(angle)
+    # Calculate azimuth and elevation angles for even sphere coverage
+    num_azimuth = sphere_divisions
+    num_elevation = sphere_divisions
 
-        # Camera position on turntable
-        camera_pos = np.array([
-            camera_radius * np.cos(angle),
-            camera_radius * np.sin(angle),
-            camera_radius * 0.3  # Slight elevation
-        ], dtype=np.float32)
+    # Elevation from 0 (north pole) to π (south pole), avoid exact poles
+    elevations = np.linspace(0.1 * np.pi, 0.9 * np.pi, num_elevation)
 
-        # View direction (from camera toward origin)
-        view_dir = -camera_pos / np.linalg.norm(camera_pos)
+    # Azimuth from 0 to 2π (full circle), don't include endpoint (0 = 2π)
+    azimuths = np.linspace(0, 2 * np.pi, num_azimuth, endpoint=False)
 
-        # Determine which 3 faces are visible from this viewpoint
-        # Face is visible if its outward normal points toward the camera
-        visible_faces = []
+    view_idx = 0
+    for elev in elevations:
+        for azim in azimuths:
+            # Spherical to Cartesian conversion
+            # x = r*sin(θ)*cos(φ), y = r*sin(θ)*sin(φ), z = r*cos(θ)
+            # where θ is elevation (polar angle) and φ is azimuth
+            camera_pos = np.array([
+                camera_radius * np.sin(elev) * np.cos(azim),
+                camera_radius * np.sin(elev) * np.sin(azim),
+                camera_radius * np.cos(elev)
+            ], dtype=np.float32)
 
-        # Check each face
-        # Face normals: -X=[−1,0,0], +X=[1,0,0], -Y=[0,−1,0], +Y=[0,1,0], -Z=[0,0,−1], +Z=[0,0,1]
-        face_normals = [
-            np.array([-1, 0, 0]),  # Face 0: -X
-            np.array([1, 0, 0]),   # Face 1: +X
-            np.array([0, -1, 0]),  # Face 2: -Y
-            np.array([0, 1, 0]),   # Face 3: +Y
-            np.array([0, 0, -1]),  # Face 4: -Z
-            np.array([0, 0, 1])    # Face 5: +Z
-        ]
+            view_positions.append(camera_pos)
 
-        for face_id, normal in enumerate(face_normals):
-            # Face is visible if normal points away from camera
-            # (i.e., dot product with view direction is positive)
-            if np.dot(normal, view_dir) > 0:
-                visible_faces.append(face_id)
+            # View direction (from camera toward origin)
+            view_dir = -camera_pos / np.linalg.norm(camera_pos)
 
-        print(f"View {view_idx} (angle={np.degrees(angle):.1f}°): "
-              f"visible faces = {visible_faces}")
+            # Determine which faces are visible from this viewpoint
+            # Face is visible if its outward normal points toward the camera
+            visible_faces = []
 
-        # Sample rays on visible faces
-        for face_id in visible_faces:
-            for _ in range(samples_per_face):
-                # Sample point on this face
-                if face_id == 0:  # -X face
-                    y = np.random.uniform(bbox_min[1], bbox_max[1])
-                    z = np.random.uniform(bbox_min[2], bbox_max[2])
-                    origin = np.array([bbox_min[0], y, z], dtype=np.float32)
-                elif face_id == 1:  # +X face
-                    y = np.random.uniform(bbox_min[1], bbox_max[1])
-                    z = np.random.uniform(bbox_min[2], bbox_max[2])
-                    origin = np.array([bbox_max[0], y, z], dtype=np.float32)
-                elif face_id == 2:  # -Y face
-                    x = np.random.uniform(bbox_min[0], bbox_max[0])
-                    z = np.random.uniform(bbox_min[2], bbox_max[2])
-                    origin = np.array([x, bbox_min[1], z], dtype=np.float32)
-                elif face_id == 3:  # +Y face
-                    x = np.random.uniform(bbox_min[0], bbox_max[0])
-                    z = np.random.uniform(bbox_min[2], bbox_max[2])
-                    origin = np.array([x, bbox_max[1], z], dtype=np.float32)
-                elif face_id == 4:  # -Z face
-                    x = np.random.uniform(bbox_min[0], bbox_max[0])
-                    y = np.random.uniform(bbox_min[1], bbox_max[1])
-                    origin = np.array([x, y, bbox_min[2]], dtype=np.float32)
-                else:  # face_id == 5, +Z face
-                    x = np.random.uniform(bbox_min[0], bbox_max[0])
-                    y = np.random.uniform(bbox_min[1], bbox_max[1])
-                    origin = np.array([x, y, bbox_max[2]], dtype=np.float32)
+            # Face normals: -X=[−1,0,0], +X=[1,0,0], -Y=[0,−1,0], +Y=[0,1,0], -Z=[0,0,−1], +Z=[0,0,1]
+            face_normals = [
+                np.array([-1, 0, 0]),  # Face 0: -X
+                np.array([1, 0, 0]),   # Face 1: +X
+                np.array([0, -1, 0]),  # Face 2: -Y
+                np.array([0, 1, 0]),   # Face 3: +Y
+                np.array([0, 0, -1]),  # Face 4: -Z
+                np.array([0, 0, 1])    # Face 5: +Z
+            ]
 
-                # Ray direction: from surface point toward camera
-                direction = camera_pos - origin
-                direction = direction / np.linalg.norm(direction)
+            for face_id, normal in enumerate(face_normals):
+                # Face is visible if normal points away from camera
+                # (i.e., dot product with view direction is positive)
+                if np.dot(normal, view_dir) > 0:
+                    visible_faces.append(face_id)
 
-                origins.append(origin)
-                directions.append(direction)
-                face_ids.append(face_id)
-                view_ids.append(view_idx)
+            print(f"View {view_idx} (azim={np.degrees(azim):.1f}°, elev={np.degrees(elev):.1f}°): "
+                  f"visible faces = {visible_faces}")
+
+            # Sample rays on visible faces
+            for face_id in visible_faces:
+                for _ in range(samples_per_face):
+                    # Sample point on this face
+                    if face_id == 0:  # -X face
+                        y = np.random.uniform(bbox_min[1], bbox_max[1])
+                        z = np.random.uniform(bbox_min[2], bbox_max[2])
+                        origin = np.array([bbox_min[0], y, z], dtype=np.float32)
+                    elif face_id == 1:  # +X face
+                        y = np.random.uniform(bbox_min[1], bbox_max[1])
+                        z = np.random.uniform(bbox_min[2], bbox_max[2])
+                        origin = np.array([bbox_max[0], y, z], dtype=np.float32)
+                    elif face_id == 2:  # -Y face
+                        x = np.random.uniform(bbox_min[0], bbox_max[0])
+                        z = np.random.uniform(bbox_min[2], bbox_max[2])
+                        origin = np.array([x, bbox_min[1], z], dtype=np.float32)
+                    elif face_id == 3:  # +Y face
+                        x = np.random.uniform(bbox_min[0], bbox_max[0])
+                        z = np.random.uniform(bbox_min[2], bbox_max[2])
+                        origin = np.array([x, bbox_max[1], z], dtype=np.float32)
+                    elif face_id == 4:  # -Z face
+                        x = np.random.uniform(bbox_min[0], bbox_max[0])
+                        y = np.random.uniform(bbox_min[1], bbox_max[1])
+                        origin = np.array([x, y, bbox_min[2]], dtype=np.float32)
+                    else:  # face_id == 5, +Z face
+                        x = np.random.uniform(bbox_min[0], bbox_max[0])
+                        y = np.random.uniform(bbox_min[1], bbox_max[1])
+                        origin = np.array([x, y, bbox_max[2]], dtype=np.float32)
+
+                    # Ray direction: from surface point toward camera
+                    direction = camera_pos - origin
+                    direction = direction / np.linalg.norm(direction)
+
+                    origins.append(origin)
+                    directions.append(direction)
+                    face_ids.append(face_id)
+                    view_ids.append(view_idx)
+
+            view_idx += 1
 
     return (np.array(origins, dtype=np.float32),
             np.array(directions, dtype=np.float32),
             np.array(face_ids, dtype=np.int32),
             np.array(view_ids, dtype=np.int32),
-            np.array(view_angles, dtype=np.float32))
+            np.array(view_positions, dtype=np.float32))
 
 
 def sample_rays_on_bounding_box(grid_info, num_samples_per_face):
@@ -251,21 +266,21 @@ def main():
     parser.add_argument(
         "--sampling-mode",
         type=str,
-        choices=["turntable", "all_faces"],
-        default="turntable",
-        help="Ray sampling mode: turntable (visible faces from viewpoints) or all_faces (uniform on all faces)"
+        choices=["sphere", "all_faces"],
+        default="sphere",
+        help="Ray sampling mode: sphere (visible faces from spherical viewpoints) or all_faces (uniform on all faces)"
     )
     parser.add_argument(
-        "--num-views",
+        "--sphere-divisions",
         type=int,
-        default=8,
-        help="Number of turntable viewpoints (only for turntable mode)"
+        default=4,
+        help="Number of divisions for azimuth and elevation (sphere mode only). Total viewpoints = divisions²"
     )
     parser.add_argument(
         "--samples-per-view",
         type=int,
         default=3000,
-        help="Number of ray samples per viewpoint (only for turntable mode, distributed across 3 visible faces)"
+        help="Number of ray samples per viewpoint (only for sphere mode, distributed across visible faces)"
     )
     parser.add_argument(
         "--samples-per-face",
@@ -315,19 +330,20 @@ def main():
     print(f"Grid info: {grid_info}")
 
     # Generate rays based on sampling mode
-    if args.sampling_mode == "turntable":
-        print(f"\nGenerating turntable rays: {args.num_views} views x {args.samples_per_view} samples...")
-        origins, directions, face_ids, view_ids, view_angles = sample_rays_turntable(
-            grid_info, args.num_views, args.samples_per_view
+    if args.sampling_mode == "sphere":
+        num_views = args.sphere_divisions ** 2
+        print(f"\nGenerating sphere rays: {args.sphere_divisions}×{args.sphere_divisions} = {num_views} views x {args.samples_per_view} samples...")
+        origins, directions, face_ids, view_ids, view_positions = sample_rays_sphere(
+            grid_info, args.sphere_divisions, args.samples_per_view
         )
     else:  # all_faces
         print(f"\nGenerating {args.samples_per_face * 6} rays on all bounding box faces...")
         origins, directions, face_ids = sample_rays_on_bounding_box(
             grid_info, args.samples_per_face
         )
-        # Create dummy view_ids and view_angles for consistency
+        # Create dummy view_ids and view_positions for consistency
         view_ids = np.zeros(len(origins), dtype=np.int32)
-        view_angles = np.array([0.0], dtype=np.float32)
+        view_positions = np.zeros((1, 3), dtype=np.float32)
 
     print(f"Ray origins shape: {origins.shape}")
     print(f"Ray directions shape: {directions.shape}")
@@ -353,15 +369,17 @@ def main():
         print(f"  Max distance (hits only): {distances[hits > 0].max():.3f}")
         print(f"  Mean distance (hits only): {distances[hits > 0].mean():.3f}")
 
-    # Per-view statistics (for turntable mode)
-    if args.sampling_mode == "turntable":
+    # Per-view statistics (for sphere mode)
+    if args.sampling_mode == "sphere":
+        num_views = args.sphere_divisions ** 2
         print("\nPer-view statistics:")
-        for view_id in range(args.num_views):
+        for view_id in range(num_views):
             mask = view_ids == view_id
             view_hits = hits[mask].sum()
             view_total = mask.sum()
             view_hit_rate = 100.0 * view_hits / view_total if view_total > 0 else 0
-            print(f"  View {view_id} (angle={np.degrees(view_angles[view_id]):.1f}°): "
+            cam_pos = view_positions[view_id]
+            print(f"  View {view_id} (pos=[{cam_pos[0]:.1f}, {cam_pos[1]:.1f}, {cam_pos[2]:.1f}]): "
                   f"{view_hits}/{view_total} hits ({view_hit_rate:.1f}%)")
 
     # Per-face statistics
@@ -390,7 +408,7 @@ def main():
         hits=hits,
         face_ids=face_ids,
         view_ids=view_ids,
-        view_angles=view_angles,
+        view_positions=view_positions,
         grid_shape=voxels.shape,
         voxel_size=grid_info['voxel_size'],
         object_id=args.object_id,
@@ -404,8 +422,8 @@ def main():
     print(f"  distances: {distances.shape} - Distance through occupied voxels")
     print(f"  hits: {hits.shape} - Binary hit flags (1=hit, 0=miss)")
     print(f"  face_ids: {face_ids.shape} - Which bbox face ray originated from (0-5)")
-    print(f"  view_ids: {view_ids.shape} - Which turntable view (0 to num_views-1)")
-    print(f"  view_angles: {view_angles.shape} - Turntable angles in radians")
+    print(f"  view_ids: {view_ids.shape} - Which view (0 to num_views-1)")
+    print(f"  view_positions: {view_positions.shape} - Camera positions for each view")
     print(f"  grid_shape: {voxels.shape} - Original voxel grid dimensions")
     print(f"  voxel_size: {grid_info['voxel_size']} - Size of each voxel")
     print(f"  sampling_mode: {args.sampling_mode}")
@@ -416,10 +434,9 @@ def main():
 
         print("\nCreating visualization...")
 
-        if args.sampling_mode == "turntable":
+        if args.sampling_mode == "sphere":
             # Create ragged grid: rows = views, cols = visible faces per view
-            # First, determine which faces are visible from each view
-            num_views = args.num_views
+            num_views = args.sphere_divisions ** 2
             max_faces = 6  # Maximum possible faces per view
 
             fig = plt.figure(figsize=(20, 4 * num_views))
@@ -467,10 +484,11 @@ def main():
                                        cmap='viridis', s=2, alpha=0.6, vmin=0,
                                        vmax=distances[hits > 0].max() if (hits > 0).any() else 1)
 
-                    # Title with view angle and face
+                    # Title with view position and face
+                    cam_pos = view_positions[view_id]
                     if col_idx == 0:
-                        ax.set_ylabel(f'View {view_id}\n{np.degrees(view_angles[view_id]):.0f}°\n\n{ylabel}',
-                                    fontsize=10, fontweight='bold')
+                        ax.set_ylabel(f'View {view_id}\nPos: [{cam_pos[0]:.1f},{cam_pos[1]:.1f},{cam_pos[2]:.1f}]\n\n{ylabel}',
+                                    fontsize=9, fontweight='bold')
                     else:
                         ax.set_ylabel(ylabel, fontsize=9)
 
@@ -491,8 +509,8 @@ def main():
                            verticalalignment='top',
                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
-            plt.suptitle(f'Object {args.object_id} - Turntable Ray Sampling\n'
-                        f'(Rows: Viewpoints, Columns: Visible Faces)',
+            plt.suptitle(f'Object {args.object_id} - Spherical Ray Sampling\n'
+                        f'({args.sphere_divisions}×{args.sphere_divisions} viewpoints, Rows: Views, Columns: Visible Faces)',
                         fontsize=14, fontweight='bold')
 
         else:  # all_faces mode
