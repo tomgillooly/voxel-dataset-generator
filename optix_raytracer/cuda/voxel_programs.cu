@@ -106,43 +106,37 @@ __device__ float trace_voxel_grid(const float3& ray_origin,
             break;
         }
 
-        // Determine next t value
+        // Determine next t value (when we'll exit this voxel)
         float next_t;
         if (tMax.x < tMax.y && tMax.x < tMax.z) {
             next_t = tMax.x;
-            tMax.x += tDelta.x;
-            voxel.x += step.x;
         } else if (tMax.y < tMax.z) {
             next_t = tMax.y;
-            tMax.y += tDelta.y;
-            voxel.y += step.y;
         } else {
             next_t = tMax.z;
-            tMax.z += tDelta.z;
-            voxel.z += step.z;
         }
 
-        // Check if exited grid
+        // Clamp to grid exit
         if (next_t > t_exit) {
             next_t = t_exit;
         }
 
-        // Check if previous voxel was occupied
-        int3 prev_voxel = make_int3(
-            voxel.x - step.x,
-            voxel.y - step.y,
-            voxel.z - step.z
-        );
+        // Check if CURRENT voxel is occupied and accumulate distance through it
+        if (is_voxel_occupied(voxel.x, voxel.y, voxel.z, grid)) {
+            float segment_length = next_t - current_t;
+            accumulated_distance += segment_length;
+        }
 
-        if (prev_voxel.x >= 0 && prev_voxel.x < grid.resolution.x &&
-            prev_voxel.y >= 0 && prev_voxel.y < grid.resolution.y &&
-            prev_voxel.z >= 0 && prev_voxel.z < grid.resolution.z) {
-
-            if (is_voxel_occupied(prev_voxel.x, prev_voxel.y, prev_voxel.z, grid)) {
-                // Accumulate distance through this voxel
-                float segment_length = next_t - current_t;
-                accumulated_distance += segment_length;
-            }
+        // Move to next voxel
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            tMax.x += tDelta.x;
+            voxel.x += step.x;
+        } else if (tMax.y < tMax.z) {
+            tMax.y += tDelta.y;
+            voxel.y += step.y;
+        } else {
+            tMax.z += tDelta.z;
+            voxel.z += step.z;
         }
 
         current_t = next_t;
