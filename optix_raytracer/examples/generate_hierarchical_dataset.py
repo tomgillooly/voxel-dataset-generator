@@ -346,7 +346,19 @@ def main():
         "--samples-per-view",
         type=int,
         default=3000,
-        help="Number of ray samples per viewpoint (distributed across visible faces)"
+        help="Number of ray samples per viewpoint at top level (distributed across visible faces)"
+    )
+    parser.add_argument(
+        "--adaptive-sampling",
+        action="store_true",
+        default=False,
+        help="Halve sampling density with each level (level 0: N samples, level 1: N/2, level 2: N/4, etc.)"
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=100,
+        help="Minimum samples per view when using adaptive sampling (default: 100)"
     )
     parser.add_argument(
         "--skip-empty",
@@ -391,11 +403,30 @@ def main():
     # Create output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Compute sampling density per level if adaptive sampling is enabled
+    samples_per_level = {}
+    if args.adaptive_sampling:
+        # Find all unique levels
+        levels = sorted(set(level for (level, _) in unique_subvolumes.keys()))
+        for level in levels:
+            # Halve samples with each level: level 0 = N, level 1 = N/2, level 2 = N/4, etc.
+            level_samples = max(args.min_samples, args.samples_per_view // (2 ** level))
+            samples_per_level[level] = level_samples
+
+        print(f"\nAdaptive sampling enabled:")
+        for level in levels:
+            print(f"  Level {level}: {samples_per_level[level]} samples per view")
+    else:
+        # Use same sampling for all levels
+        levels = sorted(set(level for (level, _) in unique_subvolumes.keys()))
+        for level in levels:
+            samples_per_level[level] = args.samples_per_view
+        print(f"\nUniform sampling: {args.samples_per_view} samples per view at all levels")
+
     # Process each unique subvolume
     print(f"\nProcessing {len(unique_subvolumes)} unique subvolumes...")
     print(f"Output directory: {args.output_dir}")
     print(f"Sphere divisions: {args.sphere_divisions} (= {args.sphere_divisions**2} viewpoints)")
-    print(f"Samples per view: {args.samples_per_view}")
 
     results = []
     skipped_count = 0
@@ -409,13 +440,16 @@ def main():
                 empty_count += 1
                 continue
 
+            # Get level-specific sample count
+            level_samples = samples_per_level[level]
+
             result = process_subvolume(
                 voxel_path=info['path'],
                 hash_val=hash_val,
                 level=level,
                 output_dir=args.output_dir,
                 sphere_divisions=args.sphere_divisions,
-                samples_per_view=args.samples_per_view,
+                samples_per_view=level_samples,
                 skip_empty=args.skip_empty
             )
 
@@ -471,6 +505,9 @@ def main():
         "output_dir": str(args.output_dir),
         "sphere_divisions": args.sphere_divisions,
         "samples_per_view": args.samples_per_view,
+        "adaptive_sampling": args.adaptive_sampling,
+        "min_samples": args.min_samples if args.adaptive_sampling else None,
+        "samples_per_level": samples_per_level if args.adaptive_sampling else None,
         "total_subvolumes": len(unique_subvolumes),
         "processed": len(results),
         "skipped_already_exists": skipped_count,

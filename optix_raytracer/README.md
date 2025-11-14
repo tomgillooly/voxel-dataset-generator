@@ -261,6 +261,20 @@ python examples/generate_hierarchical_dataset.py \
 - `--object-ids`: Specific objects to process (default: all objects)
 - `--min-level`, `--max-level`: Filter by hierarchy level
 - `--skip-empty`: Skip empty subvolumes (recommended)
+- `--adaptive-sampling`: Halve sampling density with each level (level 0: N, level 1: N/2, level 2: N/4, etc.)
+- `--min-samples`: Minimum samples per view when using adaptive sampling (default: 100)
+
+**Adaptive Sampling Example:**
+```bash
+# Use adaptive sampling: level 0 gets 3000 samples, level 1 gets 1500, level 2 gets 750, etc.
+python examples/generate_hierarchical_dataset.py \
+    --dataset-dir dataset \
+    --samples-per-view 3000 \
+    --adaptive-sampling \
+    --min-samples 100
+```
+
+This is useful for balancing quality and processing time - higher resolution levels get more samples, while deeper levels (smaller subvolumes) get proportionally fewer samples.
 
 **Output Structure:**
 ```
