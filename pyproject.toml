@@ -25,6 +25,10 @@ viz = [
     "jupyter>=1.0.0",
     "anywidget>=0.9.0",
 ]
+neural-rendering = [
+    "torch>=2.0.0",
+    "psutil>=5.9.0",
+]
 
 [project.scripts]
 voxel-gen = "voxel_dataset_generator.pipeline:main"
