@@ -269,7 +269,22 @@ def collect_unique_subvolumes(dataset_dir, object_ids=None):
     unique_subvolumes = {}
 
     for obj_id in tqdm(object_ids, desc="Reading subdivision maps"):
-        subdivision_map_path = objects_dir / f"object_{obj_id}" / "subdivision_map.json"
+        object_dir = objects_dir / f"object_{obj_id}"
+
+        # Add level 0 (full object) - these are stored as level_0.npz in each object dir
+        level_0_path = object_dir / "level_0.npz"
+        if level_0_path.exists():
+            # Use object_id as the hash for level 0
+            key = (0, obj_id)
+            if key not in unique_subvolumes:
+                unique_subvolumes[key] = {
+                    'level': 0,
+                    'hash': obj_id,
+                    'path': level_0_path,
+                    'is_empty': False  # Assume level 0 objects are not empty
+                }
+
+        subdivision_map_path = object_dir / "subdivision_map.json"
 
         if not subdivision_map_path.exists():
             print(f"Warning: No subdivision map for object {obj_id}")

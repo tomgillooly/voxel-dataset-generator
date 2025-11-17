@@ -107,6 +107,7 @@ def benchmark_dataloader_iteration(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        collate_fn=collate_ray_batch,
         pin_memory=True,
         prefetch_factor=2 if num_workers > 0 else None,
     )
@@ -381,7 +382,13 @@ def benchmark_memory_usage(dataset_dir, ray_dataset_dir):
 
     # Test with DataLoader
     print("\nTesting with DataLoader (4 workers)...")
-    loader = DataLoader(dataset, batch_size=8, num_workers=4, pin_memory=True)
+    loader = DataLoader(
+        dataset,
+        batch_size=8,
+        num_workers=4,
+        collate_fn=collate_ray_batch,
+        pin_memory=True
+    )
 
     for i, batch in enumerate(loader):
         if i >= 10:
@@ -422,6 +429,7 @@ def benchmark_worker_scaling(dataset, max_workers: int = 8):
             batch_size=8,
             shuffle=True,
             num_workers=num_workers,
+            collate_fn=collate_ray_batch,
             pin_memory=num_workers > 0,
             prefetch_factor=2 if num_workers > 0 else None,
         )

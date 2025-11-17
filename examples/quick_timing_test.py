@@ -73,6 +73,7 @@ def main():
         shuffle=True,
         num_workers=2,
         pin_memory=True,
+        collate_fn=collate_ray_batch,
     )
 
     start = time.perf_counter()

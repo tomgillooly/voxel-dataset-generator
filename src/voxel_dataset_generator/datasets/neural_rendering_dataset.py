@@ -387,6 +387,9 @@ def collate_ray_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     a different number of rays. It concatenates all rays into single tensors
     and tracks which rays belong to which subvolume.
 
+    Note: If voxel grids have different sizes (due to different hierarchy levels),
+    they will be padded to the maximum size in the batch.
+
     Args:
         batch: List of samples from HierarchicalVoxelRayDataset
 
@@ -396,7 +399,7 @@ def collate_ray_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
             - directions: (total_rays, 3) all ray directions
             - distances: (total_rays,) all distances
             - hits: (total_rays,) all hit flags
-            - voxels: (batch_size, 1, D, H, W) stacked voxel grids
+            - voxels: (batch_size, 1, D, H, W) stacked voxel grids (padded if needed)
             - ray_to_voxel: (total_rays,) mapping from ray index to voxel index
             - levels: (batch_size,) hierarchy levels
             - hashes: list of hashes
@@ -426,13 +429,40 @@ def collate_ray_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         levels.append(sample['level'])
         hashes.append(sample['hash'])
 
+    # Check if we need to pad voxels (different sizes due to hierarchy levels)
+    voxel_shapes = [v.shape for v in all_voxels]
+    if len(set(voxel_shapes)) > 1:
+        # Find max dimensions
+        max_dims = [
+            max(v.shape[i] for v in all_voxels)
+            for i in range(len(all_voxels[0].shape))
+        ]
+
+        # Pad all voxels to max size
+        padded_voxels = []
+        for voxel in all_voxels:
+            # Calculate padding for each dimension
+            padding = []
+            for i in range(len(voxel.shape) - 1, -1, -1):  # Reverse order for F.pad
+                pad_amount = max_dims[i] - voxel.shape[i]
+                padding.extend([0, pad_amount])
+
+            # Pad with zeros
+            padded = torch.nn.functional.pad(voxel, padding, mode='constant', value=0)
+            padded_voxels.append(padded)
+
+        voxels_tensor = torch.stack(padded_voxels, dim=0)
+    else:
+        # All same size, can stack directly
+        voxels_tensor = torch.stack(all_voxels, dim=0)
+
     # Concatenate all rays
     batched = {
         'origins': torch.cat(all_origins, dim=0),
         'directions': torch.cat(all_directions, dim=0),
         'distances': torch.cat(all_distances, dim=0),
         'hits': torch.cat(all_hits, dim=0),
-        'voxels': torch.stack(all_voxels, dim=0),
+        'voxels': voxels_tensor,
         'ray_to_voxel': torch.tensor(ray_to_voxel, dtype=torch.long),
         'levels': torch.tensor(levels, dtype=torch.long),
         'hashes': hashes,
