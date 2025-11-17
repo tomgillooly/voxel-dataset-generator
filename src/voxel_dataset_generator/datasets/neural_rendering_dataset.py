@@ -139,9 +139,48 @@ class HierarchicalVoxelRayDataset(Dataset):
         if not self.ray_dataset_dir.exists():
             raise FileNotFoundError(f"Ray dataset not found: {self.ray_dataset_dir}")
 
-        # Find all ray files
+        # First, handle level 0 (top-level objects)
+        # Level 0 files are named object_XXXX_level_0_rays.npz or object_XXXX_rays.npz
+        if levels is None or 0 in levels:
+            for ray_file in self.ray_dataset_dir.glob("*level_0_rays.npz"):
+                # Extract object ID from filename (e.g., "object_0000_level_0_rays.npz" -> "0000")
+                parts = ray_file.stem.split("_")
+                if len(parts) >= 2 and parts[0] == "object":
+                    object_id = parts[1]
+
+                    # Check if this object is in our split
+                    if object_id not in self.object_ids:
+                        continue
+
+                    # Find corresponding voxel file in object directory
+                    voxel_path = (self.dataset_dir / "objects" /
+                                 f"object_{object_id}" / "level_0.npz")
+
+                    if not voxel_path.exists():
+                        print(f"Warning: Level 0 voxel file not found for object {object_id}")
+                        continue
+
+                    # Use object_id as the "hash" for level 0
+                    sample_id = f"object_{object_id}"
+
+                    # Add to samples
+                    self.samples.append({
+                        'hash': sample_id,
+                        'level': 0,
+                        'ray_path': ray_file,
+                        'voxel_path': voxel_path,
+                        'is_trivial': False,  # Top-level objects are never trivial
+                        'object_id': object_id,
+                    })
+                    seen_hashes.add(sample_id)
+
+        # Then handle subvolume levels (1 and above)
         for level_dir in sorted(self.ray_dataset_dir.glob("level_*")):
             level = int(level_dir.name.split("_")[1])
+
+            # Skip level 0 (already handled above)
+            if level == 0:
+                continue
 
             # Skip if level not requested
             if levels is not None and level not in levels:
