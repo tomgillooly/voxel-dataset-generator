@@ -628,7 +628,8 @@ def generate_dataset_from_thingi10k(
     base_resolution: int = 128,
     min_resolution: int = 4,
     download_dir: Optional[Path] = None,
-    resume: bool = True
+    resume: bool = True,
+    solid: bool = False
 ):
     """Generate dataset from Thingi10k.
 
@@ -658,7 +659,7 @@ def generate_dataset_from_thingi10k(
         base_resolution=base_resolution,
         min_resolution=min_resolution,
         output_dir=output_dir,
-        solid_voxelization=True,
+        solid_voxelization=solid,
         enable_splitting=True
     )
 
@@ -750,6 +751,12 @@ def main():
         default=4,
         help="Minimum subdivision resolution"
     )
+    parser.add_argument(
+        "--solid",
+        type=bool,
+        default=False,
+        help="Minimum subdivision resolution"
+    )
 
     args = parser.parse_args()
 
@@ -758,7 +765,8 @@ def main():
         num_objects=args.num_objects,
         output_dir=args.output_dir,
         base_resolution=args.resolution,
-        min_resolution=args.min_resolution
+        min_resolution=args.min_resolution,
+        solid=args.solid
     )
 
 

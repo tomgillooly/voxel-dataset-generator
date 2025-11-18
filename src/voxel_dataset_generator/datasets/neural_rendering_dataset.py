@@ -7,10 +7,12 @@ and paired voxel configurations for training neural rendering models.
 import json
 import numpy as np
 import torch
+import tqdm
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Literal
 from collections import defaultdict
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, BatchSampler, SequentialSampler, RandomSampler
+from .sparse_utils import voxels_to_sparse_coo, voxels_to_sparse_index
 
 
 class HierarchicalVoxelRayDataset(Dataset):
@@ -37,11 +39,16 @@ class HierarchicalVoxelRayDataset(Dataset):
         ray_dataset_dir: Path to ray tracing dataset
         split: Data split to load ('train', 'val', 'test')
         levels: List of hierarchy levels to include (None = all levels)
-        samples_per_subvolume: Number of ray samples per subvolume (None = all rays)
+        rays_per_chunk: Number of rays per chunk (None = all rays in one chunk per subvolume)
         cache_size: Number of voxel grids to keep in memory (0 = no caching)
         include_empty: Include empty subvolumes
         transform: Optional transform to apply to samples
         seed: Random seed for reproducibility
+        sparse_voxels: If True, return voxels in sparse COO format for PyTorch Geometric
+        sparse_mode: Type of sparse representation ('coo' or 'graph')
+                    'coo': Returns coordinates and features only
+                    'graph': Returns graph with edge indices for GNN operations
+        sparse_connectivity: For graph mode, neighbor connectivity (6, 18, or 26)
 
     Example:
         >>> dataset = HierarchicalVoxelRayDataset(
@@ -49,10 +56,22 @@ class HierarchicalVoxelRayDataset(Dataset):
         ...     ray_dataset_dir=Path("ray_dataset_hierarchical"),
         ...     split="train",
         ...     levels=[3, 4, 5],
-        ...     samples_per_subvolume=1000
+        ...     rays_per_chunk=1000
         ... )
         >>> sample = dataset[0]
         >>> print(sample['origins'].shape, sample['voxels'].shape)
+
+        >>> # For sparse voxel representation
+        >>> dataset = HierarchicalVoxelRayDataset(
+        ...     dataset_dir=Path("dataset"),
+        ...     ray_dataset_dir=Path("ray_dataset_hierarchical"),
+        ...     split="train",
+        ...     sparse_voxels=True,
+        ...     sparse_mode='coo'
+        ... )
+        >>> sample = dataset[0]
+        >>> print(sample['voxel_pos'].shape)  # (N, 3) occupied voxel coordinates
+        >>> print(sample['voxel_features'].shape)  # (N, 1) features
     """
 
     def __init__(
@@ -61,20 +80,26 @@ class HierarchicalVoxelRayDataset(Dataset):
         ray_dataset_dir: Path,
         split: Literal['train', 'val', 'test'] = 'train',
         levels: Optional[List[int]] = None,
-        samples_per_subvolume: Optional[int] = None,
+        rays_per_chunk: Optional[int] = None,
         cache_size: int = 100,
         include_empty: bool = False,
         transform: Optional[callable] = None,
-        seed: int = 42
+        seed: int = 42,
+        sparse_voxels: bool = False,
+        sparse_mode: Literal['coo', 'graph'] = 'coo',
+        sparse_connectivity: int = 6
     ):
         self.dataset_dir = Path(dataset_dir)
         self.ray_dataset_dir = Path(ray_dataset_dir)
         self.split = split
-        self.samples_per_subvolume = samples_per_subvolume
+        self.rays_per_chunk = rays_per_chunk
         self.cache_size = cache_size
         self.include_empty = include_empty
         self.transform = transform
         self.rng = np.random.RandomState(seed)
+        self.sparse_voxels = sparse_voxels
+        self.sparse_mode = sparse_mode
+        self.sparse_connectivity = sparse_connectivity
 
         # Load metadata
         self._load_metadata()
@@ -85,14 +110,19 @@ class HierarchicalVoxelRayDataset(Dataset):
         # Collect available samples
         self._collect_samples(levels)
 
+        # Build chunk index
+        self._build_chunk_index()
+
         # Initialize cache
         self._voxel_cache = {}
         self._cache_order = []
 
-        print(f"Loaded {len(self.samples)} samples for split '{split}'")
+        print(f"Loaded {len(self.chunks)} chunks from {len(self.samples)} subvolumes for split '{split}'")
         if levels:
             print(f"  Levels: {sorted(set(s['level'] for s in self.samples))}")
         print(f"  Unique subvolumes: {len(set(s['hash'] for s in self.samples))}")
+        if rays_per_chunk:
+            print(f"  Rays per chunk: {rays_per_chunk}")
 
     def _load_metadata(self):
         """Load dataset metadata."""
@@ -140,13 +170,13 @@ class HierarchicalVoxelRayDataset(Dataset):
             raise FileNotFoundError(f"Ray dataset not found: {self.ray_dataset_dir}")
 
         # First, handle level 0 (top-level objects)
-        # Level 0 files are named object_XXXX_level_0_rays.npz or object_XXXX_rays.npz
+        # Level 0 files are in level_0/ directory, named XXXX_rays.npz
         if levels is None or 0 in levels:
-            for ray_file in self.ray_dataset_dir.glob("*level_0_rays.npz"):
-                # Extract object ID from filename (e.g., "object_0000_level_0_rays.npz" -> "0000")
-                parts = ray_file.stem.split("_")
-                if len(parts) >= 2 and parts[0] == "object":
-                    object_id = parts[1]
+            level_0_dir = self.ray_dataset_dir / "level_0"
+            if level_0_dir.exists():
+                for ray_file in level_0_dir.glob("**/*_rays.npz"):
+                    # Extract object ID from filename (e.g., "0011_rays.npz" -> "0011")
+                    object_id = ray_file.stem.replace("_rays", "")
 
                     # Check if this object is in our split
                     if object_id not in self.object_ids:
@@ -225,6 +255,42 @@ class HierarchicalVoxelRayDataset(Dataset):
         if len(self.samples) == 0:
             raise ValueError(f"No samples found for split '{self.split}' with given criteria")
 
+    def _build_chunk_index(self):
+        """Build index mapping dataset indices to (subvolume, chunk_start, chunk_end).
+
+        This creates chunks of rays from each subvolume based on rays_per_chunk.
+        If rays_per_chunk is None, each subvolume gets one chunk with all rays.
+        """
+        self.chunks = []
+
+        for sample_info in tqdm.tqdm(self.samples, desc='Building chunk index'):
+            # Load ray file to get number of rays
+            ray_data = np.load(sample_info['ray_path'])
+            num_rays = len(ray_data['origins'])
+
+            if self.rays_per_chunk is None:
+                # One chunk with all rays
+                self.chunks.append({
+                    'sample_idx': len(self.chunks),
+                    'subvolume_idx': self.samples.index(sample_info),
+                    'chunk_start': 0,
+                    'chunk_end': num_rays,
+                    'num_rays': num_rays
+                })
+            else:
+                # Split into chunks
+                num_chunks = (num_rays + self.rays_per_chunk - 1) // self.rays_per_chunk
+                for chunk_idx in range(num_chunks):
+                    start = chunk_idx * self.rays_per_chunk
+                    end = min(start + self.rays_per_chunk, num_rays)
+                    self.chunks.append({
+                        'sample_idx': len(self.chunks),
+                        'subvolume_idx': self.samples.index(sample_info),
+                        'chunk_start': start,
+                        'chunk_end': end,
+                        'num_rays': end - start
+                    })
+
     def _hash_in_split(self, hash_val: str) -> bool:
         """Check if a hash belongs to objects in this split."""
         # Trivial hashes are shared across all splits
@@ -272,75 +338,125 @@ class HierarchicalVoxelRayDataset(Dataset):
         return voxels
 
     def __len__(self) -> int:
-        """Return number of samples."""
-        return len(self.samples)
+        """Return number of chunks."""
+        return len(self.chunks)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """Get a sample by index.
+    def _load_ray_data_mmap(self, ray_path: Path):
+        """Load ray data using memory mapping for efficient chunked access.
 
         Args:
-            idx: Sample index
+            ray_path: Path to ray .npz file
+
+        Returns:
+            Memory-mapped arrays for efficient slicing
+        """
+        ray_key = str(ray_path)
+
+        # Check if already loaded
+        if hasattr(self, '_ray_mmap_cache') and ray_key in self._ray_mmap_cache:
+            return self._ray_mmap_cache[ray_key]
+
+        # Load with mmap_mode for efficient chunked access
+        ray_data = np.load(ray_path, mmap_mode='r')
+
+        # Cache the mmap object (lightweight - doesn't load data)
+        if not hasattr(self, '_ray_mmap_cache'):
+            self._ray_mmap_cache = {}
+
+        self._ray_mmap_cache[ray_key] = ray_data
+
+        return ray_data
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """Get a chunk by index.
+
+        Args:
+            idx: Chunk index
 
         Returns:
             Dictionary containing:
-                - origins: (N, 3) ray origins
-                - directions: (N, 3) ray directions
-                - distances: (N,) ray distances
-                - hits: (N,) binary hit flags
+                - origins: (N, 3) ray origins for this chunk
+                - directions: (N, 3) ray directions for this chunk
+                - distances: (N,) ray distances for this chunk
+                - hits: (N,) binary hit flags for this chunk
                 - voxels: (1, D, H, W) voxel grid (channel-first for conv nets)
                 - level: hierarchy level
                 - hash: subvolume hash
+                - chunk_idx: index of this chunk within the subvolume
                 - view_ids: (N,) view indices (optional)
                 - face_ids: (N,) face indices (optional)
         """
-        sample_info = self.samples[idx]
+        chunk_info = self.chunks[idx]
+        sample_info = self.samples[chunk_info['subvolume_idx']]
 
-        # Load ray data
-        ray_data = np.load(sample_info['ray_path'])
+        # Load ray data using memory mapping
+        ray_data = self._load_ray_data_mmap(sample_info['ray_path'])
 
         # Load voxel data
         voxels = self._load_voxels(sample_info['voxel_path'])
 
-        # Extract ray components
-        origins = ray_data['origins']
-        directions = ray_data['directions']
-        distances = ray_data['distances']
-        hits = ray_data['hits']
+        # Extract ray components for this chunk
+        start = chunk_info['chunk_start']
+        end = chunk_info['chunk_end']
 
-        # Subsample rays if requested
-        if self.samples_per_subvolume is not None:
-            num_rays = len(origins)
-            if num_rays > self.samples_per_subvolume:
-                indices = self.rng.choice(
-                    num_rays,
-                    self.samples_per_subvolume,
-                    replace=False
-                )
-                origins = origins[indices]
-                directions = directions[indices]
-                distances = distances[indices]
-                hits = hits[indices]
+        # Slice arrays (mmap makes this very fast - only reads what we need)
+        origins = np.array(ray_data['origins'][start:end])
+        directions = np.array(ray_data['directions'][start:end])
+        distances = np.array(ray_data['distances'][start:end])
+        hits = np.array(ray_data['hits'][start:end])
+
+        cube_size = 2.0**(7-sample_info['level'])
+        cube_diag = np.sqrt(3*cube_size**2)
+
+        # Process voxels based on sparse mode
+        voxels_tensor = torch.from_numpy(voxels.astype(np.float32)).unsqueeze(0)  # Add channel dim
 
         # Build sample dict
         sample = {
             'origins': torch.from_numpy(origins.astype(np.float32)),
             'directions': torch.from_numpy(directions.astype(np.float32)),
-            'distances': torch.from_numpy(distances.astype(np.float32)),
+            'distances': torch.from_numpy(distances.astype(np.float32)) / cube_diag,
             'hits': torch.from_numpy(hits.astype(np.float32)),
-            'voxels': torch.from_numpy(voxels.astype(np.float32)).unsqueeze(0),  # Add channel dim
             'level': sample_info['level'],
             'hash': sample_info['hash'],
+            'chunk_idx': start // (self.rays_per_chunk if self.rays_per_chunk else 1),
         }
 
-        # Add optional fields if present
+        # Add voxels in requested format
+        if self.sparse_voxels:
+            if self.sparse_mode == 'coo':
+                # Sparse COO format for PyTorch Geometric
+                sparse_data = voxels_to_sparse_coo(voxels_tensor, return_batch=False)
+                sample['voxel_pos'] = sparse_data['pos']
+                sample['voxel_features'] = sparse_data['features']
+                sample['voxel_shape'] = sparse_data['shape']
+                sample['num_voxels'] = sparse_data['num_nodes']
+            elif self.sparse_mode == 'graph':
+                # Graph format with edges for GNN operations
+                graph_data = voxels_to_sparse_index(
+                    voxels_tensor,
+                    connectivity=self.sparse_connectivity
+                )
+                sample['voxel_pos'] = graph_data['pos']
+                sample['voxel_features'] = graph_data['features']
+                sample['voxel_edge_index'] = graph_data['edge_index']
+                sample['voxel_shape'] = graph_data['shape']
+            else:
+                raise ValueError(f"Unknown sparse_mode: {self.sparse_mode}")
+        else:
+            # Dense voxel format (original behavior)
+            sample['voxels'] = voxels_tensor
+
+        # Add optional fields if present (also need to be chunked)
         if 'view_ids' in ray_data:
-            sample['view_ids'] = torch.from_numpy(ray_data['view_ids'])
+            view_ids = np.array(ray_data['view_ids'][start:end])
+            sample['view_ids'] = torch.from_numpy(view_ids)
         if 'face_ids' in ray_data:
-            sample['face_ids'] = torch.from_numpy(ray_data['face_ids'])
+            face_ids = np.array(ray_data['face_ids'][start:end])
+            sample['face_ids'] = torch.from_numpy(face_ids)
         if 'view_positions' in ray_data:
-            sample['view_positions'] = torch.from_numpy(
-                ray_data['view_positions'].astype(np.float32)
-            )
+            view_positions = np.array(ray_data['view_positions'][start:end])
+            sample['view_positions'] = torch.from_numpy(view_positions.astype(np.float32))
 
         # Apply transform if provided
         if self.transform is not None:
@@ -360,7 +476,7 @@ class HierarchicalVoxelRayDataset(Dataset):
         return dict(distribution)
 
 
-class RayBatchSampler:
+class RayBatchSampler(BatchSampler):
     """Custom sampler that yields batches of rays from multiple subvolumes.
 
     This sampler is useful for training neural rendering models where you want
@@ -382,41 +498,27 @@ class RayBatchSampler:
     def __init__(
         self,
         dataset: HierarchicalVoxelRayDataset,
-        rays_per_batch: int = 4096,
-        subvolumes_per_batch: int = 8,
+        batch_size: int = 8,
         shuffle: bool = True,
         drop_last: bool = False
     ):
-        self.dataset = dataset
-        self.rays_per_batch = rays_per_batch
-        self.subvolumes_per_batch = subvolumes_per_batch
-        self.shuffle = shuffle
-        self.drop_last = drop_last
+        # Create a simple SequentialSampler or RandomSampler for the base class
+        sampler = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
 
-        self.rays_per_subvolume = rays_per_batch // subvolumes_per_batch
+        # Initialize parent class with sampler, batch_size=subvolumes_per_batch, drop_last
+        super().__init__(sampler, batch_size=batch_size, drop_last=drop_last)
+
+        self.dataset = dataset
+        self.subvolumes_per_batch = batch_size
+        self.shuffle = shuffle
 
     def __iter__(self):
-        """Yield batches of subvolume indices."""
-        indices = list(range(len(self.dataset)))
+        """Yield batches of subvolume indices.
 
-        if self.shuffle:
-            np.random.shuffle(indices)
-
-        # Yield batches of subvolume indices
-        for i in range(0, len(indices), self.subvolumes_per_batch):
-            batch = indices[i:i + self.subvolumes_per_batch]
-
-            if len(batch) < self.subvolumes_per_batch and self.drop_last:
-                continue
-
-            yield batch
-
-    def __len__(self):
-        """Return number of batches."""
-        num_batches = len(self.dataset) // self.subvolumes_per_batch
-        if not self.drop_last and len(self.dataset) % self.subvolumes_per_batch != 0:
-            num_batches += 1
-        return num_batches
+        Uses the parent BatchSampler's iterator which handles the sampling logic.
+        """
+        # Use parent class iterator which already handles batching from sampler
+        yield from super().__iter__()
 
 
 def collate_ray_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
@@ -426,8 +528,13 @@ def collate_ray_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     a different number of rays. It concatenates all rays into single tensors
     and tracks which rays belong to which subvolume.
 
+    Supports both dense and sparse voxel representations:
+    - Dense: voxels are stacked and padded if needed
+    - Sparse COO: voxel_pos and voxel_features are concatenated with batch indices
+    - Sparse Graph: same as COO but also handles edge indices
+
     Note: If voxel grids have different sizes (due to different hierarchy levels),
-    they will be padded to the maximum size in the batch.
+    they will be padded to the maximum size in the batch (dense mode only).
 
     Args:
         batch: List of samples from HierarchicalVoxelRayDataset
@@ -438,20 +545,38 @@ def collate_ray_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
             - directions: (total_rays, 3) all ray directions
             - distances: (total_rays,) all distances
             - hits: (total_rays,) all hit flags
-            - voxels: (batch_size, 1, D, H, W) stacked voxel grids (padded if needed)
             - ray_to_voxel: (total_rays,) mapping from ray index to voxel index
             - levels: (batch_size,) hierarchy levels
             - hashes: list of hashes
+
+            Dense mode only:
+            - voxels: (batch_size, 1, D, H, W) stacked voxel grids (padded if needed)
+
+            Sparse COO mode only:
+            - voxel_pos: (total_voxels, 3) all voxel positions
+            - voxel_features: (total_voxels, 1) all voxel features
+            - voxel_batch: (total_voxels,) mapping from voxel to batch index
+            - voxel_shapes: (batch_size, 3) original shapes for each sample
+
+            Sparse Graph mode only:
+            - voxel_pos: (total_voxels, 3) all voxel positions
+            - voxel_features: (total_voxels, 1) all voxel features
+            - voxel_edge_index: (2, total_edges) all edges (with offset batch indices)
+            - voxel_batch: (total_voxels,) mapping from voxel to batch index
+            - voxel_shapes: (batch_size, 3) original shapes for each sample
     """
     # Separate ray data from voxel data
     all_origins = []
     all_directions = []
     all_distances = []
     all_hits = []
-    all_voxels = []
     ray_to_voxel = []
     levels = []
     hashes = []
+
+    # Check if batch uses sparse or dense voxels
+    is_sparse = 'voxel_pos' in batch[0]
+    is_graph = 'voxel_edge_index' in batch[0]
 
     for batch_idx, sample in enumerate(batch):
         num_rays = len(sample['origins'])
@@ -460,7 +585,6 @@ def collate_ray_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         all_directions.append(sample['directions'])
         all_distances.append(sample['distances'])
         all_hits.append(sample['hits'])
-        all_voxels.append(sample['voxels'])
 
         # Track which voxel each ray belongs to
         ray_to_voxel.extend([batch_idx] * num_rays)
@@ -468,44 +592,87 @@ def collate_ray_batch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         levels.append(sample['level'])
         hashes.append(sample['hash'])
 
-    # Check if we need to pad voxels (different sizes due to hierarchy levels)
-    voxel_shapes = [v.shape for v in all_voxels]
-    if len(set(voxel_shapes)) > 1:
-        # Find max dimensions
-        max_dims = [
-            max(v.shape[i] for v in all_voxels)
-            for i in range(len(all_voxels[0].shape))
-        ]
-
-        # Pad all voxels to max size
-        padded_voxels = []
-        for voxel in all_voxels:
-            # Calculate padding for each dimension
-            padding = []
-            for i in range(len(voxel.shape) - 1, -1, -1):  # Reverse order for F.pad
-                pad_amount = max_dims[i] - voxel.shape[i]
-                padding.extend([0, pad_amount])
-
-            # Pad with zeros
-            padded = torch.nn.functional.pad(voxel, padding, mode='constant', value=0)
-            padded_voxels.append(padded)
-
-        voxels_tensor = torch.stack(padded_voxels, dim=0)
-    else:
-        # All same size, can stack directly
-        voxels_tensor = torch.stack(all_voxels, dim=0)
-
-    # Concatenate all rays
+    # Build base batched dictionary
     batched = {
         'origins': torch.cat(all_origins, dim=0),
         'directions': torch.cat(all_directions, dim=0),
         'distances': torch.cat(all_distances, dim=0),
         'hits': torch.cat(all_hits, dim=0),
-        'voxels': voxels_tensor,
         'ray_to_voxel': torch.tensor(ray_to_voxel, dtype=torch.long),
         'levels': torch.tensor(levels, dtype=torch.long),
         'hashes': hashes,
     }
+
+    # Handle voxel data based on format
+    if is_sparse:
+        # Sparse voxel format (COO or Graph)
+        all_voxel_pos = []
+        all_voxel_features = []
+        voxel_batch = []
+        voxel_shapes = []
+
+        if is_graph:
+            all_edge_indices = []
+
+        node_offset = 0  # Track node index offset for edge indices
+
+        for batch_idx, sample in enumerate(batch):
+            num_voxels = sample['voxel_pos'].shape[0]
+
+            all_voxel_pos.append(sample['voxel_pos'])
+            all_voxel_features.append(sample['voxel_features'])
+            voxel_batch.extend([batch_idx] * num_voxels)
+            voxel_shapes.append(sample['voxel_shape'])
+
+            if is_graph and num_voxels > 0:
+                # Add edge indices with offset for this batch item
+                edge_index = sample['voxel_edge_index'] + node_offset
+                all_edge_indices.append(edge_index)
+
+            node_offset += num_voxels
+
+        # Concatenate sparse voxel data
+        batched['voxel_pos'] = torch.cat(all_voxel_pos, dim=0) if all_voxel_pos else torch.empty((0, 3))
+        batched['voxel_features'] = torch.cat(all_voxel_features, dim=0) if all_voxel_features else torch.empty((0, 1))
+        batched['voxel_batch'] = torch.tensor(voxel_batch, dtype=torch.long)
+        batched['voxel_shapes'] = torch.stack(voxel_shapes, dim=0)
+
+        if is_graph:
+            batched['voxel_edge_index'] = torch.cat(all_edge_indices, dim=1) if all_edge_indices else torch.empty((2, 0), dtype=torch.long)
+    else:
+        # Dense voxel format
+        all_voxels = []
+        for sample in batch:
+            all_voxels.append(sample['voxels'])
+
+        # Check if we need to pad voxels (different sizes due to hierarchy levels)
+        voxel_shapes = [v.shape for v in all_voxels]
+        if len(set(voxel_shapes)) > 1:
+            # Find max dimensions
+            max_dims = [
+                max(v.shape[i] for v in all_voxels)
+                for i in range(len(all_voxels[0].shape))
+            ]
+
+            # Pad all voxels to max size
+            padded_voxels = []
+            for voxel in all_voxels:
+                # Calculate padding for each dimension
+                padding = []
+                for i in range(len(voxel.shape) - 1, -1, -1):  # Reverse order for F.pad
+                    pad_amount = max_dims[i] - voxel.shape[i]
+                    padding.extend([0, pad_amount])
+
+                # Pad with zeros
+                padded = torch.nn.functional.pad(voxel, padding, mode='constant', value=0)
+                padded_voxels.append(padded)
+
+            voxels_tensor = torch.stack(padded_voxels, dim=0)
+        else:
+            # All same size, can stack directly
+            voxels_tensor = torch.stack(all_voxels, dim=0)
+
+        batched['voxels'] = voxels_tensor
 
     # Add optional fields if present
     if 'view_ids' in batch[0]:

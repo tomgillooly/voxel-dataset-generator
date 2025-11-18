@@ -148,47 +148,6 @@ class Voxelizer:
 
         return matrix.astype(bool), metadata
 
-    def _fill_interior(self, matrix: np.ndarray) -> np.ndarray:
-        """Fill the interior of a voxelized mesh.
-
-        Uses a flood-fill approach from outside the bounding box to identify
-        exterior voxels, then fills everything else.
-
-        Args:
-            matrix: Binary voxel array (surface voxelization)
-
-        Returns:
-            Solid voxel array with interior filled
-        """
-        # Create a padded version to ensure we can flood-fill from outside
-        padded = np.pad(matrix, pad_width=1, mode='constant', constant_values=0)
-
-        # Flood fill from corner (0,0,0) which is guaranteed to be outside
-        # This marks all exterior (empty) voxels
-        exterior = np.zeros_like(padded, dtype=bool)
-        exterior[0, 0, 0] = True
-
-        # Dilate the seed point to fill all connected exterior voxels
-        # Use a 3x3x3 structure for 26-connectivity
-        structure = ndimage.generate_binary_structure(3, 3)
-
-        # Iterate until no more exterior voxels can be reached
-        while True:
-            dilated = ndimage.binary_dilation(exterior, structure=structure)
-            # Can only expand into empty (non-surface) voxels
-            dilated = dilated & ~padded
-            if np.array_equal(dilated, exterior):
-                break
-            exterior = dilated
-
-        # Interior is everything that's not exterior and not already part of surface
-        interior = ~exterior
-
-        # Remove padding
-        interior = interior[1:-1, 1:-1, 1:-1]
-
-        return interior
-
     def _ensure_resolution(
         self,
         matrix: np.ndarray,
