@@ -223,19 +223,57 @@ class HierarchicalModel(nn.Module):
 
 ## Experiment Plan
 
-### Phase 0: Validate Ground Truth Pipeline
+### Phase 0: Validate Angular Representation (Per-Patch SH Truncation)
 
-**Goal**: Confirm SH truncation doesn't introduce unacceptable error.
+**Goal**: Confirm SH truncation doesn't introduce unacceptable *angular* error, independent of spatial discretization.
+
+**Important note on error sources:**
+
+The patch-based representation introduces two sources of discretization error:
+
+1. **Angular (SH truncation)**: Continuous directional distribution → finite SH coefficients
+2. **Spatial (patch discretization)**: Continuous boundary position → discrete patches
+
+Spatial error is likely the dominant source of fidelity loss and will probably be large. We acknowledge this and defer addressing it to the coordinate-based approach (Appendix B). Phase 0 validates only the angular component to ensure we're not compounding two severe error sources.
 
 **Method**:
-1. Select 5 diverse structures (varying complexity, genus)
-2. Render with Monte Carlo (high sample count) as gold standard
-3. Render with SH-reconstructed transfer at orders 2, 3, 4
-4. Compute L2 and perceptual error (LPIPS) on rendered images under test illumination
+1. Select 3-5 diverse structures
+2. For a sampling of patch pairs (incident patch, exitant patch):
+   - Run Monte Carlo: collect many (direction_in, direction_out, throughput) samples
+   - For each exitant direction distribution, project onto SH basis at orders 2, 3, 4
+   - Reconstruct the angular distribution from SH coefficients
+   - Compare reconstructed distribution against raw MC samples
 
-**Success criterion**: Order-2 SH error < 10% relative to Monte Carlo, or order-3 if needed.
+```python
+def validate_sh_per_patch(mc_samples, sh_order):
+    """
+    mc_samples: exitant directions with associated throughput weights
+    Returns error between empirical angular distribution and SH reconstruction
+    """
+    # Project onto SH basis
+    sh_coeffs = project_to_sh(mc_samples.directions, mc_samples.weights, sh_order)
+    
+    # Reconstruct at sample directions
+    reconstructed = evaluate_sh(sh_coeffs, mc_samples.directions)
+    
+    # Compare against empirical weights
+    return relative_mse(reconstructed, mc_samples.weights)
+```
 
-**Deliverable**: Table of errors, decision on SH order, documented ceiling.
+3. Aggregate error statistics across patch pairs and structures
+
+**Success criterion**: Per-patch angular reconstruction error < 10% relative to MC distribution, at order 2 or 3.
+
+**Failure modes**:
+- High error even at order 4: The angular distributions are too complex (high-frequency features). May indicate strong single-scattering component with sharp directional peaks. Consider higher SH order or alternative angular basis.
+- Error varies wildly across patches: Some patch pairs have simple distributions (diffuse), others complex. May need adaptive SH order or accept non-uniform fidelity.
+
+**Deliverable**: 
+- Table of per-patch angular errors by SH order
+- Decision on SH order for subsequent phases
+- Documented angular ceiling (distinct from spatial ceiling)
+
+**Note**: This does not validate the full pipeline. Rendered images will show spatial discretization artifacts regardless of SH accuracy. The coordinate-based approach (Appendix B) addresses this if the learning problem is otherwise solved.
 
 ---
 
